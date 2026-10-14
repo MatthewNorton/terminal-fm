@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "ai-radio",
+  "version": "1.0.0",
+  "description": "A continuous music player and neural DJ for Claude Code: generates tracks with Stable Audio 3, narrates what Claude is working on between songs.",
+  "author": { "name": "Matt Norton", "url": "https://github.com/MatthewNorton" },
+  "homepage": "https://github.com/MatthewNorton/terminal-fm",
+  "repository": "https://github.com/MatthewNorton/terminal-fm",
+  "license": "MIT",
+  "keywords": ["music", "radio", "tts", "stable-audio", "dj"]
+}

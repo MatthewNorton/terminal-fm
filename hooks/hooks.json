@@ -1,0 +1,30 @@
+{
+  "description": "Feeds the AI Radio DJ a line when a session starts and when Claude finishes a turn.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/radio-hook.sh\" SessionStart",
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/radio-hook.sh\" Stop",
+            "async": true,
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

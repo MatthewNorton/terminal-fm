@@ -1,0 +1,2 @@
+# The hook launcher runs under sh; a CRLF checkout (core.autocrlf=true on Windows) would break it.
+*.sh text eol=lf

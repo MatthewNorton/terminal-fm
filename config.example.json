@@ -1,0 +1,22 @@
+{
+  "source": "stability-api",
+  "volume": 85,
+  "library_dir": "",
+  "stability_api": {
+    "submit_url": "https://api.stability.ai/v2beta/audio/stable-audio/text-to-audio",
+    "results_url": "https://api.stability.ai/v2beta/audio/results",
+    "balance_url": "https://api.stability.ai/v1/user/balance",
+    "model": "stable-audio-3",
+    "steps": 8,
+    "duration": 120,
+    "output_format": "mp3",
+    "ca_bundle": ""
+  },
+  "dj": {
+    "announce_when_idle": false,
+    "breaking_news": false,
+    "voice": "auto",
+    "kokoro_voice": "am_michael",
+    "rate": 1
+  }
+}
