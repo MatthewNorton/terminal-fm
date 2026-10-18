@@ -1,0 +1,9 @@
+# Keeps the GitHub Actions used in .github/workflows current. The radio itself has no package
+# dependencies to update: radio.py and dj.py are stdlib only, and kokoro-onnx is an optional extra
+# each user installs themselves.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

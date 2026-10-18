@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-latest, windows-latest]
+        python: ["3.8", "3.12"]
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Optional: lets the wav+mp3 encode tests run on Linux. Without ffmpeg they are skipped.
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+
+      - name: Unit tests
+        run: python -m unittest discover tests -v
+
+      - name: Smoke test
+        run: python smoke_test.py
+
+      # README drift (layer 1) only. Plain `python readme_check.py` also runs layer 2, which
+      # compares the code with the snapshot in .readme_sync/; that folder is gitignored, so in a
+      # fresh clone every watched file reads as "unreviewed" and the check exits 1 by design.
+      - name: README check (drift layer)
+        shell: bash
+        run: >
+          python -c "import sys, readme_check as rc;
+          p = rc.drift();
+          print('\n'.join('  - ' + x for x in p) if p else 'README drift (layer 1): none');
+          sys.exit(1 if p else 0)"
+
+      - name: Release check
+        run: python release_check.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Validate plugin
+        shell: bash
+        env:
+          DISABLE_AUTOUPDATER: "1"
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+        # With both manifests present, `validate .` checks marketplace.json only (CLI 2.1.296
+        # printed "Validating marketplace manifest"), so plugin.json gets its own call.
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          claude plugin validate . --strict
+          claude plugin validate .claude-plugin/plugin.json --strict

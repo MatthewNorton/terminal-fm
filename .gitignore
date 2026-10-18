@@ -1,0 +1,38 @@
+# Terminal FM release tree: two kinds of files never ship.
+#
+# 1. Secrets and per-machine runtime state. The API key, the config overlay, the
+#    daemon's state/queue/position files, logs, generation history, listing snapshots,
+#    the cached Kokoro interpreter path, the music library itself and the DJ's scratch
+#    WAVs. All of these are created by the code at run time and belong to one machine.
+.key
+config.json
+.kokoro_python
+*.jsonl
+*.log
+state.json
+nowplaying.txt
+last_list.json
+last_archive.json
+resume.json
+playlist.json
+breaking.txt
+dj_speaking.lock
+.hook_seen
+queue/
+output/
+_dj*.wav
+__pycache__/
+.readme_sync/
+# A maintainer's local list of identifying strings for release_check.py; committing it would
+# publish them.
+.release_markers
+
+# 2. Downloaded models and binaries. Large, separately licensed, and fetched by the
+#    user per THIRD_PARTY_NOTICES.md: Kokoro-82M ONNX + voices, the Qwen3 GGUF, the
+#    llama.cpp binaries and the gated T5Gemma tokenizer. The folders ship empty
+#    (.gitkeep) so the code finds them where it expects.
+kokoro/*.onnx
+kokoro/*.bin
+llm/*.gguf
+llm/bin/
+llm/t5gemma-tokenizer.json
