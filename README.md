@@ -20,10 +20,12 @@ Check each one in a terminal (PowerShell on Windows). If a check fails, run the 
 
 | You need | Check | Install |
 |---|---|---|
-| **Python 3.8 or newer** | Windows: `python --version` or `py --version`<br>macOS / Linux: `python3 --version` | Windows: `winget install Python.Python.3.12`<br>macOS: `brew install python`<br>Ubuntu / Debian: `sudo apt install python3` |
+| **Python 3.11 or newer** | Windows: `python --version` or `py --version`<br>macOS / Linux: `python3 --version` | Windows: `winget install Python.Python.3.14`<br>macOS: `brew install python`<br>Ubuntu 24.04+ / Debian 12+: `sudo apt install python3` (Ubuntu 22.04's is 3.10, too old) |
 | **An audio player** | `ffplay -version` or `mpv --version` | Windows: `winget install Gyan.FFmpeg`<br>macOS: nothing, `afplay` is built in<br>Ubuntu / Debian: `sudo apt install ffmpeg` |
 | **A Stability AI API key** | | Create one at <https://platform.stability.ai>. Each track costs credits (26 when checked in September 2026); `gen` prints the exact cost. |
 | **Git for Windows** (Windows only) | `git --version` | `winget install Git.Git`. Claude Code runs the plugin's hooks with its Git Bash; without it, the DJ never hears what Claude finished. |
+
+**Why 3.11:** it's the oldest Python that still gets security fixes. `setup` flags anything older.
 
 **Which player plays:** First found wins: `mpv` › `ffplay` › `afplay` (macOS) › `mpg123` › `cvlc`. Only `mpv`, `ffplay` and `cvlc` can resume a paused or interrupted track mid-song; the others restart it from the top.
 
@@ -44,7 +46,7 @@ The wizard walks you through these:
 
 | Step | What you do |
 |---|---|
-| 1. Python | Nothing. If `/tfm setup` runs, Python works. |
+| 1. Python | Nothing, if it's 3.11 or newer. On an older one, install a newer Python (see Requirements). |
 | 2. Audio player | Install one (see Requirements). |
 | 3. Stability API key | Run the command the wizard prints in a terminal outside Claude Code (below). |
 | 4. Session hooks | Start a new Claude Code session. On Windows, install Git for Windows first. |
@@ -103,7 +105,7 @@ Everything works without these. Each extra has a setup page, `/tfm setup <name>`
 
 1. Download `kokoro-v1.0.fp16.onnx` and `voices-v1.0.bin` from <https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1>.
 2. Put both files in `~/.claude/terminal-fm/kokoro/`.
-3. In a terminal, run `pip install -U kokoro-onnx soundfile` (kokoro-onnx 0.6 or newer).
+3. In a terminal, run `pip install -U kokoro-onnx soundfile` (kokoro-onnx 0.6 or newer). It needs onnxruntime, which had no build for Python 3.15 in October 2026: on 3.15, install it into a Python 3.14 and set `dj.python` to that interpreter if the voice doesn't find it.
 
 The radio finds a Python that has these packages by itself. To pin one, set `dj.python` in `config.json`. On Linux without a system voice, `sudo apt install espeak-ng` gives a basic one.
 
@@ -283,7 +285,7 @@ The key is saved to `~/.claude/terminal-fm/.key`, readable only by you on macOS 
 
 ### `hook` and `__daemon`
 
-`hook SessionStart` and `hook Stop` are what the plugin's hooks run, through `hooks/radio-hook.sh`, which finds a Python 3.8+ first. With no Python at session start, it gives Claude the install command to pass on. At session start the hook copies `statusline.py` into the data folder and notes the time for `setup`. When Claude finishes a turn, it queues, speaks or interrupts as `announce` and `breaking` say, using Claude's last message trimmed to its main point.
+`hook SessionStart` and `hook Stop` are what the plugin's hooks run, through `hooks/radio-hook.sh`, which finds a Python 3.11+ first. With no Python at session start, it gives Claude the install command to pass on. At session start the hook copies `statusline.py` into the data folder and notes the time for `setup`. When Claude finishes a turn, it queues, speaks or interrupts as `announce` and `breaking` say, using Claude's last message trimmed to its main point.
 
 `__daemon` is the playback loop that `play` starts. Never run it by hand.
 
@@ -436,7 +438,7 @@ Start with `/tfm setup`. If that doesn't explain it:
 
 | Problem | Fix |
 |---|---|
-| Windows says `Python was not found` | That message comes from a Microsoft Store shortcut, not from Python. Install Python (`winget install Python.Python.3.12`), reopen the terminal and restart Claude Code. |
+| Windows says `Python was not found` | That message comes from a Microsoft Store shortcut, not from Python. Install Python (`winget install Python.Python.3.14`), reopen the terminal and restart Claude Code. |
 | No audio player | Install one (see [Requirements](#requirements)). On Windows, `C:\ffmpeg\bin\` is checked even when it isn't on PATH. |
 | `setup` says the session hooks haven't run | Start a new Claude Code session. On Windows, install Git for Windows (`winget install Git.Git`) and restart. Claude Code looks for `bash.exe` beside `git`, or wherever `CLAUDE_CODE_GIT_BASH_PATH` points. |
 | No track in the statusline | Run `/tfm setup statusline`. The statusline refreshes each turn and every `statusLine.refreshInterval` seconds, so it can lag; `/tfm status` is always current. |

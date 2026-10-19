@@ -12,6 +12,8 @@ running this has no side effects) and each one must appear in README.md:
   * every file/folder name the code builds with `/` under ~/.claude/terminal-fm
   * dj.py subcommands and --flags, kokoro_tts.py --flags
   * the player search order, the enhancer's duration bounds, the User-Agent, the source names
+  * the minimum Python (PY_MIN) and the Python the install commands name (PY_INSTALL), wherever
+    README or the skill states a minimum or a winget Python package
   * every radio.py command is reachable from the /tfm skill (skills/tfm/SKILL.md beside
     this file, the copy the plugin ships)
 
@@ -166,8 +168,6 @@ def _opt_keys(tree):
             if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name) \
                     and node.value.id == "opt":
                 sl = node.slice
-                if hasattr(ast, "Index") and isinstance(sl, getattr(ast, "Index")):
-                    sl = sl.value                      # Python 3.8 wraps subscripts
                 if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
                     keys.add(sl.value)
     return keys
@@ -343,6 +343,20 @@ def drift():
     ua = rlit.get("USER_AGENT")
     if ua and ua not in readme:
         probs.append(f"[network] User-Agent `{ua}` is not stated in README")
+    # The minimum Python (PY_MIN) and the one the install commands name (PY_INSTALL): each
+    # "Python X.Y+" / "Python X.Y or newer" and each `Python.Python.X.Y` in README and the skill.
+    low, inst = rlit.get("PY_MIN"), rlit.get("PY_INSTALL")
+    low = "%d.%d" % tuple(low) if low else None
+    if low and f"Python {low} or newer" not in readme:
+        probs.append(f"[python] README never states the minimum, Python {low} or newer")
+    docs = [("README", readme)] + ([("SKILL.md", SKILL.read_text(encoding="utf-8"))] if SKILL.exists() else [])
+    for name, text in docs:
+        for got in re.findall(r"Python (\d+\.\d+)(?:\+| or newer)", text):
+            if low and got != low:
+                probs.append(f"[python] {name} says Python {got}+ where PY_MIN is {low}")
+        for got in re.findall(r"Python\.Python\.(\d+\.\d+)", text):
+            if inst and got != inst:
+                probs.append(f"[python] {name} installs Python {got} where PY_INSTALL is {inst}")
     gen_sec = _sections_for(readme, _keys_for(cmds, "cmd_gen"))
     dur = (rlit.get("DEFAULT_CONFIG") or {}).get("stability_api", {}).get("duration")
     if dur and f"{dur}s" not in gen_sec:

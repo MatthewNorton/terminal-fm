@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Terminal FM statusline segment. Stdlib only, Python 3.8+.
+"""Terminal FM statusline segment. Stdlib only.
 
 Prints one line for Claude Code's statusLine: what the radio is playing, read from
 <data dir>/nowplaying.txt, where the data dir is $TERMINAL_FM_HOME or ~/.claude/terminal-fm.

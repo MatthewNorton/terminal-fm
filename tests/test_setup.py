@@ -5,6 +5,7 @@ statusline.py and the `>` that marks a playing track."""
 import ast
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ from pathlib import Path
 from unittest import mock
 
 from radio_test_support import REPO, own_line, patch, radio, reset_home, run
+
+HOOK = REPO / "hooks" / "radio-hook.sh"
 
 
 class SetupCase(unittest.TestCase):
@@ -107,7 +110,17 @@ class Setup(SetupCase):
             with self.subTest(platform=platform), mock.patch.object(radio, "IS_WIN", is_win), \
                     mock.patch.object(radio.sys, "platform", platform):
                 self.assertIn("ffmpeg", radio._install_cmd("ffmpeg")[1].lower())
+                self.assertIn("python", radio._install_cmd("python")[1].lower())
                 self.assertIn(radio._install_cmd()[1], radio._install_hint())
+
+    def test_old_python_is_a_step(self):
+        self.ready()
+        patch(self, "PY_MIN", new=(99, 0))                # make this Python count as too old
+        out = self.setup_out()
+        self.assertIn(f"Step 1 of 5: Python 99.0 or newer (this is {sys.version.split()[0]})", out)
+        self.assertIn(own_line(radio._install_cmd("python")[1]), out.splitlines())
+        _, status = run(radio.cmd_status, [])
+        self.assertIn("setup   : missing Python 99.0+", status)
 
     def test_status_flags_the_gaps(self):
         patch(self, "detect_player", return_value=(None, None))
@@ -181,6 +194,19 @@ class SetupExtras(SetupCase):
 
     def test_unknown_page_prints_usage(self):
         self.assertTrue(self.setup_out("bogus").startswith("Usage: radio setup"))
+
+
+class PythonMinimum(unittest.TestCase):
+    def test_hook_manifests_and_ci_use_radios_minimum(self):
+        # These files can't import PY_MIN (shell, JSON, YAML), so every minimum they state must equal
+        # it. readme_check.py does the same for README and the skill.
+        low = "%d.%d" % radio.PY_MIN
+        self.assertEqual(re.findall(r"^min=(\S+)", HOOK.read_text(encoding="utf-8"), re.M), [low])
+        for manifest in ("plugin.json", "marketplace.json"):
+            text = (REPO / ".claude-plugin" / manifest).read_text(encoding="utf-8")
+            self.assertEqual(set(re.findall(r"Python (\d+\.\d+)\+", text)), {low}, manifest)
+        ci = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertEqual(re.findall(r'python: \["([\d.]+)"', ci), [low])
 
 
 class DefaultDataFolder(unittest.TestCase):
@@ -273,14 +299,17 @@ class StatuslineCopy(unittest.TestCase):
 class HookLauncher(unittest.TestCase):
     def launch(self, event, pythons):
         env = dict(os.environ, RADIO_HOOK_PYTHONS=pythons, TERMINAL_FM_HOME=str(radio.ROOT))
-        return subprocess.run(["sh", str(REPO / "hooks" / "radio-hook.sh"), event], input="{}",
+        return subprocess.run(["sh", str(HOOK), event], input="{}",
                               capture_output=True, text=True, env=env, timeout=60)
 
     def test_no_python_at_session_start_tells_user_and_claude(self):
         r = self.launch("SessionStart", "no-such-python-a no-such-python-b")
         self.assertEqual(r.returncode, 0)
         note = json.loads(r.stdout)
-        self.assertIn("winget install Python.Python.3.12", note["systemMessage"])
+        for is_win, platform in ((True, "win32"), (False, "darwin"), (False, "linux")):
+            with self.subTest(platform=platform), mock.patch.object(radio, "IS_WIN", is_win), \
+                    mock.patch.object(radio.sys, "platform", platform):
+                self.assertIn(radio._install_cmd("python")[1], note["systemMessage"])
         ctx = note["hookSpecificOutput"]
         self.assertEqual(ctx["hookEventName"], "SessionStart")
         self.assertIn("do not search the disk", ctx["additionalContext"])

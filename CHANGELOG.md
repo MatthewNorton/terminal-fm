@@ -2,7 +2,9 @@
 
 All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-10-19
+
+The first public release.
 
 ### Added
 
@@ -11,6 +13,7 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 ### Changed
 
 - The data folder is now `~/.claude/terminal-fm` (was `~/.claude/radio`), and the variable that moves it is `TERMINAL_FM_HOME` (was `AI_RADIO_HOME`). To keep your library, key and settings, move the old folder before you update: close Claude Code, then rename `~/.claude/radio` to `~/.claude/terminal-fm`.
+- Terminal FM needs Python 3.11 or newer (was 3.8), because 3.8, 3.9 and 3.10 no longer get security fixes. On an older Python, `setup` shows installing a newer one as a step, `status` lists it, and the session hook asks for 3.11 or newer. The install commands name Python 3.14.
 - `setup` is a step-by-step wizard: a checklist of the required steps, then only the next one spelled out, with any command on a line of its own. Run it again after each step.
 - `setup statusline`, `setup voice`, `setup enhancer` and `setup tokens` print the steps for each optional extra, with your own paths, and say whether it is installed.
 - Every "no API key" message (`gen`, `key show`, `key` without a terminal) gives the same numbered steps, with the `key` command on a line of its own.
@@ -18,7 +21,7 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 ## [1.0.0] - 2026-10-18
 
-The first public release.
+The first release, made while the repository was still private.
 
 Builds before 1.0.0 were never published, and were called AI Radio (plugin `ai-radio`). The Changed, Removed and Fixed entries describe how 1.0.0 differs from them, for anyone who ran one.
 

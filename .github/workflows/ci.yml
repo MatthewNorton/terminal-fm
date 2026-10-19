@@ -16,17 +16,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
-        python: ["3.8", "3.12"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The oldest Python that still gets security fixes (radio.py's PY_MIN) and the newest stable
+        # release, whichever that is when CI runs.
+        python: ["3.11", "3.x"]
     env:
       PYTHONIOENCODING: utf-8
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
+          # 3.x means the newest release published, not the newest one the runner image has cached.
+          check-latest: ${{ matrix.python == '3.x' }}
 
       # Optional: lets the wav+mp3 encode tests run on Linux. Without ffmpeg they are skipped.
       - name: Install ffmpeg (Linux)
@@ -53,11 +57,14 @@ jobs:
       - name: Release check
         run: python release_check.py
 
-      - uses: actions/setup-node@v4
+      # The plugin checks don't depend on Python, so they run once per OS, in the newest-Python job.
+      - uses: actions/setup-node@v7
+        if: matrix.python == '3.x'
         with:
-          node-version: "20"
+          node-version: lts/*         # the newest long-term-support Node
 
       - name: Validate plugin
+        if: matrix.python == '3.x'
         shell: bash
         env:
           DISABLE_AUTOUPDATER: "1"

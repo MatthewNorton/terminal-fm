@@ -763,8 +763,21 @@ def _print_key_help(lead):
     print(f"{lead}\n{_key_help()}")
 
 
+# The oldest Python that still gets security fixes: 3.10 reached end of life on 2026-10-01
+# (devguide.python.org/versions). hooks/radio-hook.sh refuses anything older; a test keeps them equal.
+PY_MIN = (3, 11)
+# The Python the install commands name: the newest that winget packages and that onnxruntime (which
+# the Kokoro voice needs) ships builds for. Both stopped at 3.14 on 2026-10-19.
+PY_INSTALL = "3.14"
+
+
 def _install_cmd(program="player"):
-    """(name, install command) for an audio player, or with "ffmpeg" FFmpeg itself, on this OS."""
+    """(name, install command) for an audio player, or with "ffmpeg" FFmpeg itself, or with "python"
+    Python, on this OS."""
+    if program == "python":
+        if IS_WIN:
+            return "Python", f"winget install Python.Python.{PY_INSTALL}"
+        return "Python", "brew install python" if sys.platform == "darwin" else "sudo apt install python3"
     if IS_WIN:
         return "FFmpeg", "winget install Gyan.FFmpeg"
     if sys.platform == "darwin":
@@ -1801,7 +1814,8 @@ def cmd_status(_args):
     player, _ = detect_player()
     print(f"  player  : {Path(player).name if player else '(none found)'}")
     print(f"  daemon  : {st.get('daemon_pid')} (alive: {'yes' if _daemon_alive(st) else 'no'})")
-    gaps = [what for what, have in (("audio player", player), ("API key", _read_key()),
+    gaps = [what for what, have in (("Python %d.%d+" % PY_MIN, sys.version_info >= PY_MIN),
+                                    ("audio player", player), ("API key", _read_key()),
                                     ("tracks", lib)) if not have]
     if gaps:
         print(f"  setup   : missing {', '.join(gaps)} - `radio setup` shows how to fix it")
@@ -1859,7 +1873,9 @@ def _setup_required():
         name, cmd = _install_cmd(program)
         return _steps([(f"Install {name} in a terminal:", cmd)] + restart, again)
 
-    rows = [(f"Python {sys.version.split()[0]}", True, "")]
+    py, ok = sys.version.split()[0], sys.version_info >= PY_MIN   # an older one runs, unpatched
+    rows = [(f"Python {py}" if ok else "Python %d.%d or newer (this is %s)" % (*PY_MIN, py), ok,
+             install("python"))]
     player, _ = detect_player()
     if player:
         seek = "" if _can_seek(player) else " (restarts a paused track from the top; mpv resumes mid-track)"
