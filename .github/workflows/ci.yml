@@ -75,3 +75,17 @@ jobs:
           npm install -g @anthropic-ai/claude-code
           claude plugin validate . --strict
           claude plugin validate .claude-plugin/plugin.json --strict
+
+  # The ruleset on main requires this job by its name, so renaming it means editing the ruleset.
+  # always() makes it run, and fail, when a job it needs failed or was cancelled: GitHub counts a
+  # job skipped by its condition as passed.
+  ci-passed:
+    name: CI passed
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job it needs passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: for r in $RESULTS; do [ "$r" = success ] || exit 1; done
