@@ -287,7 +287,6 @@ class KeyShow(unittest.TestCase):
         for source in (".key file", "STABILITY_API_KEY"):
             with self.subTest(source=source):
                 reset_home()
-                os.environ.pop("STABILITY_API_KEY", None)
                 if source == ".key file":
                     radio.KEY_FILE.write_text(key, encoding="utf-8")
                 else:

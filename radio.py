@@ -192,17 +192,16 @@ def _write_private(path, text):
         os.replace(tmp, path)
     except OSError:
         _unlink_quiet(tmp)
-        # Security: not _atomic_write, whose write_text creates files with the umask's mode
-        # (readable by other users on a typical system) and so left the key exposed until the
-        # chmod below. O_CREAT's mode only applies to a new file, so an existing one (a key from
-        # an older version) is tightened before the key goes in; Windows has no fchmod before 3.13.
+        # Security: not _atomic_write, whose write_text uses the umask's mode (readable by others
+        # on a typical system). O_CREAT's mode skips an existing file, so tighten it before the key
+        # goes in; Windows has no fchmod before 3.13.
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             if hasattr(os, "fchmod"):
                 os.fchmod(fd, 0o600)
             fh.write(text)
     try:
-        os.chmod(path, 0o600)           # also tightens a key file left by an older version
+        os.chmod(path, 0o600)           # exactly 0600 whatever the umask took off os.open's mode
     except OSError:
         pass
 
