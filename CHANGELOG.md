@@ -2,6 +2,13 @@
 
 All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- `radio key` keeps the key file owner-only (`0600` on POSIX) when the rename of its temp file is refused. That fallback used to rewrite the key through the general file writer, which creates files with the default permissions (readable by other users under a typical umask), and only restricted it afterwards.
+- `radio key show` says whether a key is set and where it came from, and no longer prints the key's first 6 characters.
+
 ## [1.1.0] - 2026-10-19
 
 The first public release.
