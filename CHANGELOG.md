@@ -6,7 +6,7 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 ### Added
 
-- An `examples/` folder: a 67-second demo video with sound, a track made with `/tfm eg lofi hip hop`, and a DJ line in the Kokoro voice. The README links them at the top.
+- An `examples/` folder: a 67-second demo video with sound, a track made with `/tfm eg lofi hip hop`, and a DJ line in the Kokoro voice. The README plays the video at the top and links the rest.
 
 ### Changed
 

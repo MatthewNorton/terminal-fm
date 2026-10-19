@@ -1,8 +1,8 @@
 # Terminal FM
 
-[![Terminal FM demo: setup, making a track, the DJ and a skip, with sound](examples/terminal-fm-demo.png)](examples/terminal-fm-demo.mp4)
+https://github.com/user-attachments/assets/4c59283a-45e1-4ced-890c-ee128460a36d
 
-**[Watch the demo](examples/terminal-fm-demo.mp4)** (67 seconds, with sound), or hear the parts on their own: [a generated track](examples/lofi-hip-hop-track.mp3) and [the DJ voice](examples/dj-voice.wav).
+**Demo:** 67 seconds of setup, making a track, the DJ and a skip. It starts muted, so turn the sound on. The parts on their own: [a generated track](examples/lofi-hip-hop-track.mp3), [the DJ voice](examples/dj-voice.wav) and [the video file](examples/terminal-fm-demo.mp4).
 
 Background music for your Claude Code sessions. Terminal FM makes tracks with Stability AI's Stable Audio 3, keeps them in a library on your computer and plays them on shuffle while you work. Between songs, a DJ reads out what Claude just finished.
 
