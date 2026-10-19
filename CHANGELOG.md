@@ -2,6 +2,20 @@
 
 All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- An `examples/` folder: a 67-second demo video with sound, a track made with `/tfm eg lofi hip hop`, and a DJ line in the Kokoro voice. The README links them at the top.
+
+### Changed
+
+- The data folder is now `~/.claude/terminal-fm` (was `~/.claude/radio`), and the variable that moves it is `TERMINAL_FM_HOME` (was `AI_RADIO_HOME`). To keep your library, key and settings, move the old folder before you update: close Claude Code, then rename `~/.claude/radio` to `~/.claude/terminal-fm`.
+- `setup` is a step-by-step wizard: a checklist of the required steps, then only the next one spelled out, with any command on a line of its own. Run it again after each step.
+- `setup statusline`, `setup voice`, `setup enhancer` and `setup tokens` print the steps for each optional extra, with your own paths, and say whether it is installed.
+- Every "no API key" message (`gen`, `key show`, `key` without a terminal) gives the same numbered steps, with the `key` command on a line of its own.
+- `README.md` is reorganized: one command section with a table per group, the extras with step-by-step instructions, troubleshooting as a table at the end, and the internal details folded away.
+
 ## [1.0.0] - 2026-10-18
 
 The first public release.
@@ -11,7 +25,7 @@ Builds before 1.0.0 were never published, and were called AI Radio (plugin `ai-r
 ### Added
 
 - Claude Code plugin packaging: the repo is the `terminal-fm` plugin (`.claude-plugin/plugin.json`, version 1.0.0) and its own one-plugin marketplace, `digitalbyte` (`.claude-plugin/marketplace.json`, `"source": "./"`). Install with `claude plugin marketplace add MatthewNorton/terminal-fm` and `claude plugin install terminal-fm@digitalbyte`. The plugin and marketplace descriptions name the requirements: Python 3.8+, mpv or FFmpeg (built in on macOS) and a Stability AI API key.
-- The skill ships in the repo as `skills/tfm/SKILL.md` and is invoked as `/tfm` (in full, `/terminal-fm:tfm`); it runs `python3` on macOS and Linux and `python`, then `py`, on Windows, on the `radio.py` inside the plugin, and when no Python runs it gives the install command instead of searching the disk. Words after `/tfm` that aren't a command ask for that kind of music: `/tfm smooth jazz` plays the tracks in your library that fit, and offers `egen` (which spends credits) when none do.
+- The skill ships in the repo as `skills/tfm/SKILL.md` and is invoked as `/tfm` (in full, `/terminal-fm:tfm`); it runs `python3` on macOS and Linux and `python`, then `py`, on Windows, on the `radio.py` inside the plugin, and when no Python runs it gives the install command instead of searching the disk. Name a genre instead of a command, and `/tfm smooth jazz` plays the tracks in your library that fit, and offers `egen` (which spends credits) when none do.
 - `hooks/hooks.json`: the `SessionStart` hook (on `startup` and `resume`, in the foreground) and the async `Stop` hook run through `hooks/radio-hook.sh`, which finds a working `python3`, `python` or `py` (preferring a `pythonw.exe` on Windows, so no console window opens), passes the hook's JSON through on stdin, discards output and always exits 0. With no Python 3.8+ at session start it hands Claude Code a note with the install command, for the user (`systemMessage`) and for Claude (`additionalContext`), and running in the foreground gets that note to Claude before its first reply.
 - `radio setup` (short key `se`): a read-only checklist of Python, the audio player, the API key, the session hooks, the library and the statusline, each `ok` or `NEEDED` with the exact fix, then the optional extras. `status` adds a `setup :` line when the player, the key or any tracks are missing.
 - Every "no API key" message, and `radio key` run without a terminal, prints the exact command to paste into your own terminal, with this install's Python and `radio.py` paths; `play` with no audio player prints the install command for your OS.
@@ -28,7 +42,7 @@ Builds before 1.0.0 were never published, and were called AI Radio (plugin `ai-r
 
 ### Changed
 
-- Renamed from AI Radio to **Terminal FM**, because "AI Radio" and `/radio` were easy to mistake for the radio built into Claude Code, which also owns the name `/radio` (a skill named `radio` was reachable only as `/ai-radio:radio`). The plugin is `terminal-fm` and the command `/tfm`. If you installed a pre-release `ai-radio` plugin, run `claude plugin uninstall ai-radio@digitalbyte` first, or both plugins' hooks run; on a manual install, replace `~/.claude/skills/radio/` with a copy of `skills/tfm/`. The library, key and settings stay in `~/.claude/radio` (or `AI_RADIO_HOME`), so nothing moves. The statusline, `status` and `setup` say `Terminal FM`, and requests send `User-Agent: terminal-fm/1.0`.
+- Renamed from AI Radio to **Terminal FM**. The plugin is `terminal-fm` and the command `/tfm`. If you installed a pre-release `ai-radio` plugin, run `claude plugin uninstall ai-radio@digitalbyte` first, or both plugins' hooks run; on a manual install, replace `~/.claude/skills/radio/` with a copy of `skills/tfm/`. The library, key and settings stay in `~/.claude/radio` (or `AI_RADIO_HOME`), so nothing moves. The statusline, `status` and `setup` say `Terminal FM`, and requests send `User-Agent: terminal-fm/1.0`.
 - `prompts/enhance.md` is read from the data directory first (`<data dir>/prompts/enhance.md`), falling back to the copy shipped beside `radio.py`, because a plugin update replaces the plugin's folder and would lose a prompt tuned there.
 - The `Stop` hook takes Claude's last message from the `last_assistant_message` field of its input and opens the session transcript at `transcript_path` only when that field is absent (older Claude Code versions).
 - `CLAUDE.md` moved to `.claude/CLAUDE.md`, because `claude plugin validate --strict` rejects one at the plugin root; it imports `../AGENTS.md` and is trimmed to architecture, cross-file mechanics and gotchas.

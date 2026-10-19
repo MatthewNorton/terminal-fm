@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import REPO, patch, radio, reset_home, run
+from radio_test_support import REPO, own_line, patch, radio, reset_home, run
 
 
 class SetupCase(unittest.TestCase):
@@ -36,69 +36,78 @@ class SetupCase(unittest.TestCase):
         (radio.OUTDIR / "a.mp3").write_bytes(b"ID3")
         radio.HOOK_SEEN.write_text("2026-10-17 09:00", encoding="utf-8")
 
+    def setup_out(self, *args):
+        return run(radio.cmd_setup, list(args))[1]
+
 
 class Setup(SetupCase):
-    def test_fresh_install_lists_what_is_needed(self):
+    def test_fresh_install_shows_one_step_at_a_time(self):
         patch(self, "detect_player", return_value=(None, None))
         patch(self, "_git_bash", return_value="C:/Program Files/Git/bin/bash.exe")
-        _, out = run(radio.cmd_setup, [])
+        out = self.setup_out()
+        for row in ("[x] 1. Python", "[ ] 2. Audio player", "[ ] 3. Stability API key",
+                    "[ ] 4. Session hooks", "[ ] 5. First track"):
+            self.assertIn(row, out)
+        self.assertIn("Step 2 of 5: Audio player", out)
+        self.assertIn(own_line(radio._install_cmd()[1]), out.splitlines())
+        self.assertNotIn(radio._self_cmd("key"), out)          # the key step waits its turn
+        self.assertNotIn("Ready", out)
+
+    def test_key_step_sets_the_command_apart(self):
+        patch(self, "detect_player", return_value=("/usr/bin/ffplay", None))
+        out = self.setup_out()
         lines = out.splitlines()
-        needed = [ln for ln in lines if ln.strip().startswith("NEEDED")]
-        self.assertEqual(len(needed), 3, out)                 # player, key, hooks
-        self.assertIn("audio player: none found", needed[0])
-        self.assertIn("Stability API key", needed[1])
-        self.assertIn(radio._self_cmd("key"), out)            # the exact command, on its own line
-        self.assertIn("haven't run yet", needed[2])
-        self.assertTrue(any(ln.strip().startswith("next") and "gen" in ln for ln in lines), out)
-        self.assertIn("Not ready yet", lines[-1])
+        self.assertIn("Step 3 of 5: Stability API key", out)
+        i = lines.index(own_line(radio._self_cmd("key")))
+        self.assertEqual((lines[i - 1], lines[i + 1]), ("", ""))   # blank lines around it: copies whole
+        self.assertIn("Run /tfm setup again to check.", out)
+        self.assertIn(radio.KEY_ENV_NOTE, lines)
 
     def test_all_set_says_ready(self):
         self.ready()
         (self.cfg / "settings.json").write_text(json.dumps(
-            {"statusLine": {"type": "command", "command": "python3 ~/.claude/radio/statusline.py"}}),
+            {"statusLine": {"type": "command", "command": "python3 ~/.claude/terminal-fm/statusline.py"}}),
             encoding="utf-8")
-        _, out = run(radio.cmd_setup, [])
-        self.assertNotIn("NEEDED", out)
-        self.assertIn("session hooks: last ran 2026-10-17 09:00", out)
-        self.assertIn("statusline: shows the radio", out)
-        self.assertTrue(out.splitlines()[-1].startswith("Ready: "), out)
+        out = self.setup_out()
+        self.assertNotIn("[ ]", out.split("Optional extras")[0])
+        self.assertIn("[x] 4. Session hooks: last ran 2026-10-17 09:00", out)
+        self.assertIn("Ready: /tfm play", out)
+        self.assertNotIn(radio.SETUP_RULE, out)
+        self.assertIn("[x] statusline", out)
+
+    def test_first_track_is_the_last_step(self):
+        self.ready()
+        (radio.OUTDIR / "a.mp3").unlink()
+        out = self.setup_out()
+        self.assertIn("Step 5 of 5: First track", out)
+        self.assertIn(own_line("/tfm play"), out.splitlines())
+        self.assertNotIn("Run /tfm setup again", out)
 
     def test_hooks_on_windows_without_git_bash(self):
         self.ready()
         radio.HOOK_SEEN.unlink()
         patch(self, "IS_WIN", new=True)
         patch(self, "_git_bash", return_value=None)
-        _, out = run(radio.cmd_setup, [])
-        self.assertIn("they need Git Bash", out)
-        self.assertIn("winget install Git.Git", out)
+        out = self.setup_out()
+        self.assertIn("Step 4 of 5: Session hooks", out)
+        self.assertIn(own_line("winget install Git.Git"), out.splitlines())
 
-    def test_statusline_detection(self):
-        settings = self.cfg / "settings.json"
-        self.assertIsNone(radio._statusline_state())
-        script = self.cfg / "my-line.js"
-        script.write_text('fs.readFileSync(home + "/.claude/radio/nowplaying.txt")', encoding="utf-8")
-        settings.write_text(json.dumps({"statusLine": {"command": f'node "{script}"'}}), encoding="utf-8")
-        self.assertEqual(radio._statusline_state(), "radio")     # found inside the script it runs
-        script.write_text("console.log('git branch')", encoding="utf-8")
-        self.assertEqual(radio._statusline_state(), "other")
-        _, out = run(radio.cmd_setup, [])
-        self.assertIn("yours doesn't show the radio", out)
-        self.assertNotIn('"statusLine"', out)                     # never a snippet that replaces theirs
-
-    def test_wav_mp3_without_ffmpeg_is_needed(self):
+    def test_wav_mp3_without_ffmpeg_is_a_step(self):
         self.ready()
         cfg = radio.load_config()
         cfg["stability_api"]["output_format"] = radio.BOTH_FORMATS
         patch(self, "CONFIG", new=cfg)
         patch(self, "_ffmpeg", return_value=None)
-        _, out = run(radio.cmd_setup, [])
-        self.assertIn(f"NEEDED ffmpeg, for `radio format wav+mp3`: {radio._install_hint('ffmpeg')}", out)
+        out = self.setup_out()
+        self.assertIn("Step 5 of 6: FFmpeg, for wav+mp3", out)
+        self.assertIn(own_line(radio._install_cmd("ffmpeg")[1]), out.splitlines())
 
-    def test_ffmpeg_hint_names_ffmpeg_on_every_os(self):
+    def test_install_commands_on_every_os(self):
         for is_win, platform in ((True, "win32"), (False, "darwin"), (False, "linux")):
             with self.subTest(platform=platform), mock.patch.object(radio, "IS_WIN", is_win), \
                     mock.patch.object(radio.sys, "platform", platform):
-                self.assertIn("ffmpeg", radio._install_hint("ffmpeg").lower())
+                self.assertIn("ffmpeg", radio._install_cmd("ffmpeg")[1].lower())
+                self.assertIn(radio._install_cmd()[1], radio._install_hint())
 
     def test_status_flags_the_gaps(self):
         patch(self, "detect_player", return_value=(None, None))
@@ -108,6 +117,88 @@ class Setup(SetupCase):
         self.ready()
         _, out = run(radio.cmd_status, [])
         self.assertNotIn("setup   :", out)
+
+
+class SetupExtras(SetupCase):
+    def test_cmd_setup_names_every_extra(self):
+        # cmd_setup compares its argument to an inline tuple, because readme_check.py reads the
+        # keywords a command accepts from such comparisons; it must name every extra in the table.
+        tree = ast.parse((REPO / "radio.py").read_text(encoding="utf-8"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_setup")
+        inline = next({e.value for e in c.comparators[0].elts} for c in ast.walk(fn)
+                      if isinstance(c, ast.Compare) and isinstance(c.comparators[0], ast.Tuple))
+        self.assertEqual(inline, {name for name, *_ in radio._setup_extras()})
+
+    def test_statusline_detection(self):
+        settings = self.cfg / "settings.json"
+        self.assertIsNone(radio._statusline_state())
+        script = self.cfg / "my-line.js"
+        script.write_text('fs.readFileSync(home + "/.claude/terminal-fm/nowplaying.txt")', encoding="utf-8")
+        settings.write_text(json.dumps({"statusLine": {"command": f'node "{script}"'}}), encoding="utf-8")
+        self.assertEqual(radio._statusline_state(), "radio")     # found inside the script it runs
+        script.write_text("console.log('git branch')", encoding="utf-8")
+        self.assertEqual(radio._statusline_state(), "other")
+        radio._install_statusline()                               # what the session-start hook does
+        out = self.setup_out("statusline")
+        self.assertIn(own_line(str(radio.NOW_FILE)), out.splitlines())
+        self.assertNotIn('"statusLine"', out)                     # never a snippet that replaces theirs
+
+    def test_statusline_line_parses_as_settings(self):
+        radio._install_statusline()
+        out = self.setup_out("statusline")                        # no settings.json yet: create it
+        self.assertIn(own_line(str(radio._settings_file())), out.splitlines())
+        whole = next(ln.strip() for ln in out.splitlines() if ln.strip().startswith("{"))
+        self.assertIn("statusline.py", json.loads(whole)["statusLine"]["command"])
+        radio._settings_file().write_text("{}", encoding="utf-8")
+        out = self.setup_out("statusline")                        # settings.json exists: one line to add
+        entry = next(ln.strip() for ln in out.splitlines() if ln.strip().startswith('"statusLine"'))
+        self.assertIn("statusline.py", json.loads("{" + entry + "}")["statusLine"]["command"])
+
+    def test_statusline_waits_for_the_hooks(self):
+        self.assertIn("finish /tfm setup first", self.setup_out("statusline"))
+
+    def test_pages_name_this_installs_paths(self):
+        for name, path in (("voice", radio.ROOT / "kokoro"), ("enhancer", radio.LLM_DIR),
+                           ("tokens", radio.TOKENIZER_FILE)):
+            with self.subTest(name):
+                out = self.setup_out(name)
+                self.assertIn("Status: not installed", out)
+                self.assertIn(own_line(str(path)), out.splitlines())
+                self.assertIn(f"Run /tfm setup {name} again to check.", out)
+
+    def test_enhancer_lists_only_what_is_missing(self):
+        patch(self, "_llm_paths", return_value=(None, str(radio.LLM_DIR / "m.gguf")))
+        out = self.setup_out("enhancer")
+        self.assertIn("missing llama-cli", out)
+        self.assertNotIn("Qwen3", out)
+
+    def test_installed_extras_say_so(self):
+        patch(self, "_llm_paths", return_value=("llama-cli", str(radio.LLM_DIR / "m.gguf")))
+        self.assertIn("Status: installed (m.gguf).", self.setup_out("enhancer"))
+        radio.LLM_DIR.mkdir(parents=True, exist_ok=True)
+        radio.TOKENIZER_FILE.write_text("{}", encoding="utf-8")
+        self.assertIn("Status: installed.", self.setup_out("tokens"))
+
+    def test_unknown_page_prints_usage(self):
+        self.assertTrue(self.setup_out("bogus").startswith("Usage: radio setup"))
+
+
+class DefaultDataFolder(unittest.TestCase):
+    def test_every_file_defaults_to_the_same_folder(self):
+        # radio.py, dj.py, kokoro_tts.py and statusline.py each work out the data folder (statusline.py
+        # is copied out alone, so it can't share the code); a file missed in a rename would split it.
+        home = tempfile.mkdtemp(prefix="terminal-fm-home-")
+        self.addCleanup(shutil.rmtree, home, True)
+        env = {k: v for k, v in os.environ.items() if k != "TERMINAL_FM_HOME"}
+        env.update(HOME=home, USERPROFILE=home)        # Path.home(): HOME on POSIX, USERPROFILE on Windows
+        want = str(Path(home) / ".claude" / "terminal-fm")
+        for module, expr in (("radio", "radio.ROOT"), ("dj", "dj.ROOT"), ("kokoro_tts", "kokoro_tts.ROOT"),
+                             ("statusline", "statusline.data_dir()")):
+            with self.subTest(module):
+                code = f"import sys; sys.path.insert(0, {str(REPO)!r}); import {module}; print({expr})"
+                got = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                                     text=True, timeout=60)
+                self.assertEqual(got.stdout.strip(), want, got.stderr)
 
 
 class SelfCommand(unittest.TestCase):
@@ -136,8 +227,8 @@ class SelfCommand(unittest.TestCase):
 class KeyMessages(SetupCase):
     def test_gen_without_key_prints_the_command(self):
         _, out = run(radio.source_stability_api, "lo-fi", 1, 30)
-        self.assertTrue(out.startswith("No API key."), out)
-        self.assertIn(radio._self_cmd("key"), out)
+        self.assertTrue(out.startswith("No API key yet."), out)
+        self.assertIn(own_line(radio._self_cmd("key")), out.splitlines())
 
     def test_hook_marks_session_start_only(self):
         with open(os.devnull) as nul, mock.patch.object(radio.sys, "stdin", nul):
@@ -181,7 +272,7 @@ class StatuslineCopy(unittest.TestCase):
 @unittest.skipUnless(shutil.which("sh"), "needs sh")
 class HookLauncher(unittest.TestCase):
     def launch(self, event, pythons):
-        env = dict(os.environ, RADIO_HOOK_PYTHONS=pythons, AI_RADIO_HOME=str(radio.ROOT))
+        env = dict(os.environ, RADIO_HOOK_PYTHONS=pythons, TERMINAL_FM_HOME=str(radio.ROOT))
         return subprocess.run(["sh", str(REPO / "hooks" / "radio-hook.sh"), event], input="{}",
                               capture_output=True, text=True, env=env, timeout=60)
 

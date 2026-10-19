@@ -22,7 +22,7 @@ Architecture
   Today there is one, "stability-api" (Stable Audio 3).
 * The PLAYER is auto-detected per OS (mpv > ffplay > afplay > mpg123 > cvlc) and plays
   files OR stream URLs uniformly.
-* State lives in the data directory (~/.claude/radio, or AI_RADIO_HOME): state.json,
+* State lives in the data directory (~/.claude/terminal-fm, or TERMINAL_FM_HOME): state.json,
   nowplaying.txt, config.json and the other files named under "paths" below.
 """
 
@@ -45,13 +45,13 @@ import uuid
 from pathlib import Path
 
 # --------------------------------------------------------------------------- paths
-# Two roots. CODE_DIR is wherever this file lives (a clone, a plugin install, ~/.claude/radio) and
+# Two roots. CODE_DIR is wherever this file lives (a clone, a plugin install, ~/.claude/terminal-fm) and
 # holds the scripts and prompts/. ROOT is the data directory: state, config, the key, the library,
-# downloaded models and logs. It defaults to ~/.claude/radio and AI_RADIO_HOME overrides it, so a
+# downloaded models and logs. It defaults to ~/.claude/terminal-fm and TERMINAL_FM_HOME overrides it, so a
 # checkout anywhere still finds dj.py next to itself and still shares one library and one config.
 CODE_DIR = Path(__file__).resolve().parent
-ROOT = Path(os.path.expanduser(os.environ.get("AI_RADIO_HOME", "").strip()
-                               or str(Path.home() / ".claude" / "radio")))
+ROOT = Path(os.path.expanduser(os.environ.get("TERMINAL_FM_HOME", "").strip()
+                               or str(Path.home() / ".claude" / "terminal-fm")))
 DEFAULT_OUTDIR = ROOT / "output"    # library lives here unless config.json overrides library_dir
 STATE_FILE = ROOT / "state.json"
 NOW_FILE = ROOT / "nowplaying.txt"
@@ -728,21 +728,58 @@ def _self_cmd(*args):
     return _cmdline([_console_python(), str(CODE_DIR / "radio.py")] + list(args), call=True)
 
 
-def _key_hint():
-    """How every no-key message ends: the command that stores a key, or the variable instead."""
-    return (f"run this in your own terminal (it asks for the key, hidden): {_self_cmd('key')}"
-            "  - or set STABILITY_API_KEY.")
+STEP_INDENT = " " * 7          # a step's command, path or address sits on its own line, this far in
 
 
-def _install_hint(program="player"):
-    """How to install an audio player, or with "ffmpeg" ffmpeg itself, on this OS, in one line."""
+def _steps(steps, again=""):
+    """Numbered steps, as text. A step given as (text, line) puts `line` - a command, path or web
+    address - on a line of its own between blank lines, so it can be copied whole. `again` adds a
+    last step: the command to run to check the result."""
+    if again:
+        steps = list(steps) + [f"Run {again} again to check."]
+    out = []
+    for i, step in enumerate(steps, 1):
+        text, line = step if isinstance(step, tuple) else (step, "")
+        out.append(f"  {i}. {text}")
+        if line:
+            out += ["", f"{STEP_INDENT}{line}", ""]
+    return "\n".join(out).rstrip("\n")
+
+
+KEY_ENV_NOTE = "  Or set the STABILITY_API_KEY environment variable instead."
+
+
+def _key_help(again=""):
+    """The steps that store an API key, with the exact command for this install, then the
+    environment variable instead. The key is typed at a hidden prompt, which needs a real
+    terminal, so the user runs the command; Claude can't."""
+    return _steps(["Get a key at https://platform.stability.ai",
+                   ("Open a terminal outside Claude Code and run:", _self_cmd("key")),
+                   "Paste the key when asked (it stays hidden) and press Enter."], again) + "\n" + KEY_ENV_NOTE
+
+
+def _print_key_help(lead):
+    """Every no-key message: `lead`, then the steps that store a key."""
+    print(f"{lead}\n{_key_help()}")
+
+
+def _install_cmd(program="player"):
+    """(name, install command) for an audio player, or with "ffmpeg" FFmpeg itself, on this OS."""
     if IS_WIN:
-        return "install FFmpeg (winget install Gyan.FFmpeg), then restart Claude Code"
+        return "FFmpeg", "winget install Gyan.FFmpeg"
     if sys.platform == "darwin":
-        return ("install mpv (brew install mpv)" if program == "player"
-                else "install FFmpeg (brew install ffmpeg)")
-    alt = "ffmpeg or mpv" if program == "player" else "ffmpeg"
-    return f"install FFmpeg (sudo apt install ffmpeg, or your package manager's {alt})"
+        return ("mpv", "brew install mpv") if program == "player" else ("FFmpeg", "brew install ffmpeg")
+    return "FFmpeg", "sudo apt install ffmpeg"
+
+
+def _install_hint():
+    """How to install an audio player, in one line, for `play`'s message."""
+    name, cmd = _install_cmd()
+    if IS_WIN:
+        return f"install {name} ({cmd}), then restart Claude Code"
+    if sys.platform == "darwin":
+        return f"install {name} ({cmd})"
+    return f"install {name} ({cmd}, or your package manager's ffmpeg or mpv)"
 
 
 def _curl():
@@ -967,7 +1004,7 @@ def source_stability_api(prompt, count, duration):
     sc = CONFIG["stability_api"]
     key = _read_key()
     if not key:
-        print(f"No API key. To store one, {_key_hint()}")
+        _print_key_help("No API key yet. To add one:")
         return 0, NOTHING_SENT
     slug = "".join(c if c.isalnum() else "-" for c in prompt.lower()).strip("-")[:30] or "track"
     both = sc["output_format"] == BOTH_FORMATS
@@ -1067,6 +1104,7 @@ SA3_PROMPT_TOKENS = 256
 # history was 4.16, 2026-09-25), which undercounts digits, symbols and non-Latin text: chord symbols
 # and Japanese both measured 1.41 characters a token.
 TOKENIZER_FILE = LLM_DIR / "t5gemma-tokenizer.json"
+CHARS_PER_TOKEN = 4             # the estimate without it
 _TOKENIZER = None
 
 
@@ -1127,7 +1165,7 @@ def prompt_tokens(text):
     word, because Gemma's pre-tokenizer splits on a space its normalizer has already turned to U+2581."""
     tok = _tokenizer()
     if not tok:
-        return -(-len(text) // 4), False
+        return -(-len(text) // CHARS_PER_TOKEN), False
     vocab, ranks, split = tok
     total = pos = 0
     for m in (split.finditer(text) if split else ()):
@@ -1142,7 +1180,7 @@ def prompt_tokens(text):
 
 def _tokens_desc(n, exact):
     return (f"{n} tokens" if exact else
-            f"about {n} tokens (estimated at 4 characters a token: {TOKENIZER_FILE.name} "
+            f"about {n} tokens (estimated at {CHARS_PER_TOKEN} characters a token: {TOKENIZER_FILE.name} "
             f"is not in {LLM_DIR})")
 
 
@@ -1235,8 +1273,13 @@ def _tidy_caption(text, idea):
     return ", ".join(tags + [text]) if text else ""
 
 
+def _llm_exe():
+    """Where llama-cli goes: <data dir>/llm/bin."""
+    return LLM_DIR / "bin" / ("llama-cli.exe" if IS_WIN else "llama-cli")
+
+
 def _llm_paths():
-    exe = LLM_DIR / "bin" / ("llama-cli.exe" if IS_WIN else "llama-cli")
+    exe = _llm_exe()
     exe = str(exe) if exe.exists() else shutil.which("llama-cli")
     ggufs = sorted(LLM_DIR.glob("*.gguf"))
     return exe, (str(ggufs[0]) if ggufs else None)
@@ -1778,13 +1821,18 @@ def _git_bash():
     return next((str(p) for p in cands if p.is_file()), None)
 
 
+def _settings_file():
+    """Claude Code's user settings.json: in CLAUDE_CONFIG_DIR when that is set, else ~/.claude."""
+    base = os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or "~/.claude"
+    return Path(os.path.expanduser(base)) / "settings.json"
+
+
 def _statusline_state():
     """"radio" when the user's Claude Code settings run a statusLine that shows the radio (its
     command, or a script file the command names, mentions statusline.py or nowplaying), "other"
     for a statusLine of their own that doesn't, None for no statusLine."""
-    base = Path(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or "~/.claude"))
     try:
-        cmd = json.loads((base / "settings.json").read_text(encoding="utf-8"))["statusLine"]["command"]
+        cmd = json.loads(_settings_file().read_text(encoding="utf-8"))["statusLine"]["command"]
     except Exception:
         return None
     texts = [str(cmd)]
@@ -1798,86 +1846,168 @@ def _statusline_state():
     return "radio" if any("statusline.py" in t or "nowplaying" in t for t in texts) else "other"
 
 
-def cmd_setup(_args):
-    """A first-run checklist: each requirement with ok / NEEDED and the exact next step, then the
-    optional extras. Read-only: it changes nothing, so it is safe to run at any time."""
-    more = " (README: Optional extras)"
-    marks = set()
+SETUP_RULE = "-" * 64
 
-    def row(mark, text, follow=""):
-        marks.add(mark)
-        print(f"  {mark:<7}{text}")
-        if follow:
-            print(f"           {follow}")
 
-    print("Terminal FM setup")
-    row("ok", f"Python {sys.version.split()[0]}")
+def _setup_required():
+    """The required steps in order, as (title, done, text): a done title says what was found, and
+    text spells out the steps that finish one that isn't."""
+    again = "/tfm setup"
+    restart = ["Restart Claude Code."] if IS_WIN else []
+
+    def install(program):
+        name, cmd = _install_cmd(program)
+        return _steps([(f"Install {name} in a terminal:", cmd)] + restart, again)
+
+    rows = [(f"Python {sys.version.split()[0]}", True, "")]
     player, _ = detect_player()
-    if not player:
-        row("NEEDED", f"audio player: none found - {_install_hint()}")
+    if player:
+        seek = "" if _can_seek(player) else " (restarts a paused track from the top; mpv resumes mid-track)"
+        rows.append((f"Audio player: {Path(player).stem}{seek}", True, ""))
     else:
-        row("ok", f"audio player: {Path(player).stem}")
-        if not _can_seek(player):
-            row("extra", f"{Path(player).stem} restarts a paused track from the top; mpv, ffplay "
-                "or cvlc resume mid-track")
-    if _read_key():
-        row("ok", "Stability API key: stored")
-    else:
-        row("NEEDED", "Stability API key: none yet. Get one at https://platform.stability.ai, "
-            "then run this in your own terminal (it asks for the key, hidden):", _self_cmd("key"))
+        rows.append(("Audio player", False, install("player")))
+    key = _read_key()
+    rows.append(("Stability API key: found" if key else "Stability API key", bool(key), _key_help(again)))
     try:
         seen = HOOK_SEEN.read_text(encoding="utf-8").strip()
     except Exception:
         seen = ""
-    if seen:
-        row("ok", f"session hooks: last ran {seen}")
-    elif IS_WIN and not _git_bash():
-        row("NEEDED", "session hooks: not running - they need Git Bash: install Git for Windows "
-            "(winget install Git.Git), then restart Claude Code")
+    if IS_WIN and not seen and not _git_bash():
+        hooks = [("Install Git for Windows in a terminal (Claude Code runs the hooks with its Git Bash):",
+                  "winget install Git.Git")] + restart
     else:
-        row("NEEDED", "session hooks: haven't run yet - start a new Claude Code session")
-    if CONFIG["stability_api"].get("output_format") == BOTH_FORMATS and not _ffmpeg():
-        row("NEEDED", f"ffmpeg, for `radio format wav+mp3`: {_install_hint('ffmpeg')}")
+        hooks = ["Start a new Claude Code session: the hooks run when a session starts."]
+    rows.append((f"Session hooks: last ran {seen}" if seen else "Session hooks", bool(seen),
+                 _steps(hooks, again)))
+    if CONFIG["stability_api"].get("output_format") == BOTH_FORMATS:
+        ff = _ffmpeg()
+        rows.append(("FFmpeg, for wav+mp3: found" if ff else "FFmpeg, for wav+mp3", bool(ff), install("ffmpeg")))
     n = len(get_library())
-    if n:
-        row("ok", f"library: {n} track(s) in {OUTDIR.name}")
-    else:
-        row("next", 'library: empty - make a first track: /tfm gen '
-            '"warm lo-fi hip hop, rhodes, 80 BPM"')
+    rows.append((f"Library: {n} track(s) in {OUTDIR.name}" if n else "First track", bool(n),
+                 _steps([("Make one (this spends Stability credits):",
+                          '/tfm gen "warm lo-fi hip hop, rhodes, 80 BPM"'), ("Play it:", "/tfm play")])))
+    return rows
 
-    sl = _statusline_state()
-    if sl == "radio":
-        row("ok", "statusline: shows the radio")
-    elif sl == "other":
-        row("extra", f"statusline: yours doesn't show the radio yet - have it print {NOW_FILE} "
-            "(README: Troubleshooting)")
+
+def _statusline_page(done):
+    print("Statusline: the playing track under Claude Code's prompt")
+    if done:
+        print("Status: done. Your statusline shows the radio.")
+    elif not STATUSLINE_DST.is_file():
+        print("Status: finish /tfm setup first. The session hooks put statusline.py in place.")
+    elif _statusline_state() == "other":
+        print("Status: you have your own statusline, and it doesn't show the radio yet.\n")
+        print(_steps([("Have your statusline script print the text of this file:", str(NOW_FILE))]))
+        print('  It reads "Terminal FM > <track>" while a track plays and "Terminal FM | <status>"'
+              ' otherwise, so ">" means playing.')
     else:
         cmd = _cmdline([_console_python() if IS_WIN else "python3", str(STATUSLINE_DST)])
-        row("extra", "statusline (now-playing line): add this to ~/.claude/settings.json",
-            json.dumps({"statusLine": {"type": "command", "command": cmd}})[1:-1])
-    import dj                                   # stdlib, beside this file; only setup needs it
-    if dj.kokoro_files_present():
-        row("ok", "DJ voice: Kokoro model files found")
-    elif sys.platform.startswith("linux") and not any(
-            shutil.which(t) for t in ("piper", "espeak-ng", "espeak")):
-        row("extra", "DJ voice: none found - sudo apt install espeak-ng, or Kokoro" + more)
-    else:
-        row("extra", "DJ voice: system voice; Kokoro sounds better" + more)
-    if all(_llm_paths()):
-        row("ok", "prompt enhancer: installed")
-    else:
-        row("extra", "prompt enhancer (enhance / egen): not installed" + more)
-    if TOKENIZER_FILE.is_file():
-        row("ok", "exact prompt-token count: installed")
-    else:
-        row("extra", "exact prompt-token count: estimating instead" + more)
+        entry = json.dumps({"statusLine": {"type": "command", "command": cmd}})
+        settings = _settings_file()
+        if settings.is_file():
+            steps = [("Open this file in a text editor:", str(settings)),
+                     ("Add this line inside its outer { }, with a comma after the line before it:",
+                      entry[1:-1])]
+        else:
+            steps = [("Create this file:", str(settings)), ("Put this in it:", entry)]
+        print("Status: not set up.\n")
+        print(_steps(steps + ["Save it. If the line doesn't show at your next prompt, restart Claude Code."]))
+        print('  Or ask Claude: "add the Terminal FM statusline to my settings".')
 
-    if "NEEDED" in marks:
-        print("Not ready yet: fix the NEEDED lines, top to bottom. The extras are optional.")
-    elif "next" in marks:
-        print('Almost ready: /tfm gen "<what you want to hear>", then /tfm play')
+
+def _voice_page(done):
+    import dj
+    pip = "pip install -U kokoro-onnx soundfile"
+    print("DJ voice: Kokoro-82M, a natural voice for the DJ. Without it the DJ uses your system voice.")
+    if done:
+        print(f"Status: model files found. If the DJ still sounds robotic, run this in a terminal:"
+              f"\n\n{STEP_INDENT}{pip}")
+        return
+    print("Status: not installed.\n")
+    print(_steps([(f"Download {dj.KOKORO_MODELS[0]} and {dj.KOKORO_VOICES} from:",
+                   "https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1"),
+                  ("Put both files in this folder:", str(dj.KOKORO_DIR)),
+                  ("Install its Python packages in a terminal:", pip)], again="/tfm setup voice"))
+    if sys.platform.startswith("linux") and not any(
+            shutil.which(t) for t in ("piper", "espeak-ng", "espeak")):
+        print("  No system voice was found either. For a basic one: sudo apt install espeak-ng")
+
+
+def _enhancer_page(done):
+    print("Prompt enhancer: turns a rough idea into a full prompt (/tfm enhance, /tfm egen) and"
+          " picks better track lengths. Runs on your CPU, free.")
+    exe, model = _llm_paths()
+    if done:
+        print(f"Status: installed ({Path(model).name}).")
+        return
+    steps = []
+    if not model:
+        steps += [("Download the Q4_K_M file of Qwen3-4B-Instruct-2507 (about 2.5 GB) from:",
+                   "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF"),
+                  ("Put it in this folder (keep only one .gguf there):", str(LLM_DIR))]
+    if not exe:
+        steps += [("Download the newest llama.cpp release for your system from:",
+                   "https://github.com/ggml-org/llama.cpp/releases"),
+                  (f"Copy {_llm_exe().name} and the files beside it into:", str(_llm_exe().parent))]
+    missing = " and ".join(n for n, have in (("the model", model), ("llama-cli", exe)) if not have)
+    print(f"Status: not installed (missing {missing}).\n")
+    print(_steps(steps, again="/tfm setup enhancer"))
+
+
+def _tokens_page(done):
+    print(f"Exact prompt-length check: Stable Audio 3 reads only the first {SA3_PROMPT_TOKENS} tokens"
+          f" of a prompt, so gen refuses longer ones. Without this file it estimates at {CHARS_PER_TOKEN}"
+          " characters a token.")
+    if done:
+        print("Status: installed.")
+        return
+    print("Status: not installed (estimating).\n")
+    print(_steps([("Sign in to Hugging Face and accept Google's Gemma terms at:",
+                   "https://huggingface.co/google/t5gemma-b-b-ul2"),
+                  "Download tokenizer.json from its \"Files and versions\" tab.",
+                  ("Save it as:", str(TOKENIZER_FILE))], again="/tfm setup tokens"))
+
+
+def _setup_extras():
+    """The optional extras in order, as (name, what it adds, whether it is installed, the page
+    `setup <name>` prints given that answer). One table, so the list and the pages agree."""
+    import dj                                   # stdlib, beside this file; only setup needs it
+    return [("statusline", "the playing track under Claude Code's prompt",
+             lambda: _statusline_state() == "radio", _statusline_page),
+            ("voice", "a natural DJ voice (Kokoro) instead of the system voice",
+             dj.kokoro_files_present, _voice_page),
+            ("enhancer", "turns a rough idea into a full prompt (enhance, egen)",
+             lambda: all(_llm_paths()), _enhancer_page),
+            ("tokens", "an exact prompt-length check instead of an estimate",
+             TOKENIZER_FILE.is_file, _tokens_page)]
+
+
+def cmd_setup(args):
+    """Setup, one step at a time. With no argument: the required steps as a checklist, the first
+    unfinished one spelled out, then the optional extras. `setup statusline | voice | enhancer |
+    tokens`: the steps to add that extra, with this machine's paths. Read-only: it changes
+    nothing, so it is safe to run at any time."""
+    sub = args[0].lower() if args else ""
+    if sub in ("statusline", "voice", "enhancer", "tokens"):       # inline, for readme_check.py
+        _, _, installed, page = next(e for e in _setup_extras() if e[0] == sub)
+        page(installed())
+        return
+    if sub:
+        print("Usage: radio setup | radio setup statusline | voice | enhancer | tokens")
+        return
+    rows = _setup_required()
+    print("Terminal FM setup\n")
+    for i, (title, done, _) in enumerate(rows, 1):
+        print(f"  [{'x' if done else ' '}] {i}. {title}")
+    todo = next((i for i, row in enumerate(rows) if not row[1]), None)
+    if todo is None:
+        print("\nReady: /tfm play")
     else:
-        print("Ready: /tfm play")
+        title, _, text = rows[todo]
+        print(f"\n{SETUP_RULE}\nStep {todo + 1} of {len(rows)}: {title}\n\n{text}\n{SETUP_RULE}")
+    print("\nOptional extras (/tfm setup <name> shows how to add one):")
+    for name, what, installed, _ in _setup_extras():
+        print(f"  [{'x' if installed() else ' '}] {name:<12}{what}")
 
 
 def cmd_say(args):
@@ -2271,7 +2401,7 @@ def cmd_key(args):
         env = "set" if os.environ.get("STABILITY_API_KEY", "").strip() else "not set"
         print(f"Key: {k[:6] + '…' if k else '(none)'}   source: {src}   STABILITY_API_KEY: {env}")
         if not k:
-            print(f"No key yet: {_key_hint()}")
+            _print_key_help("To add one:")
         return
     if sub in ("clear", "delete", "remove"):
         try:
@@ -2286,15 +2416,15 @@ def cmd_key(args):
         return
     # Windows getpass reads the console, not stdin, so with input piped or redirected (as when
     # Claude runs it) it waited forever instead of reaching the except below.
-    no_tty = f"No terminal to read the key from, so {_key_hint()}"
+    no_tty = "No terminal to type the key into here. To add it:"
     if not _stdin_is_console():
-        print(no_tty)
+        _print_key_help(no_tty)
         return
     import getpass
     try:
         k = getpass.getpass("Stability API key (input hidden): ").strip()
     except Exception:
-        print(no_tty)
+        _print_key_help(no_tty)
         return
     if not k:
         print("Nothing entered; key unchanged.")

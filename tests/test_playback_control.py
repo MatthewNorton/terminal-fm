@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import radio, reset_home, run
+from radio_test_support import own_line, radio, reset_home, run
 
 
 def _sleeper():
@@ -208,11 +208,10 @@ class KeyShow(unittest.TestCase):
 
     def test_no_key_names_the_next_step(self):
         _, out = run(radio.cmd_key, ["show"])
-        lines = out.strip().splitlines()
+        lines = out.splitlines()
         self.assertIn("Key: (none)", lines[0])
-        self.assertEqual(len(lines), 2)
-        self.assertIn(radio._self_cmd("key"), lines[1])      # the exact command, ready to paste
-        self.assertIn("STABILITY_API_KEY", lines[1])
+        self.assertIn(own_line(radio._self_cmd("key")), lines)   # the exact command, on its own line
+        self.assertIn(radio.KEY_ENV_NOTE, lines)
 
     def test_prompt_without_a_terminal_refuses_instead_of_waiting(self):
         # Windows getpass ignores redirected stdin and waits on the console forever. A real null
@@ -223,7 +222,7 @@ class KeyShow(unittest.TestCase):
                 typed = mock.patch("getpass.getpass", return_value="typed-key-not-real")
                 with no_terminal, typed:
                     _, out = run(radio.cmd_key, [])
-                self.assertIn("No terminal to read the key from", out)
+                self.assertIn("No terminal to type the key into", out)
                 self.assertFalse(radio.KEY_FILE.exists())
 
     def typed_key(self, key):

@@ -9,7 +9,7 @@ running this has no side effects) and each one must appear in README.md:
   * every command has its own `### ` heading in the full reference
   * the config shape and defaults (radio.py DEFAULT_CONFIG + dj.py DJ_DEFAULTS) equal README's
     ```json block, key for key and value for value
-  * every file/folder name the code builds with `/` under ~/.claude/radio
+  * every file/folder name the code builds with `/` under ~/.claude/terminal-fm
   * dj.py subcommands and --flags, kokoro_tts.py --flags
   * the player search order, the enhancer's duration bounds, the User-Agent, the source names
   * every radio.py command is reachable from the /tfm skill (skills/tfm/SKILL.md beside

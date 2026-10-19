@@ -11,7 +11,7 @@ Rules for any agent changing this folder (Claude Code, Codex, or anything else).
 - a subcommand, an alias, or a keyword a command accepts (`clear`, `all`, `auto`, the on/off words, …)
 - a flag (`play --say`, `dj.py --file`, `kokoro_tts.py --voice`, …)
 - a config key or default value (README's `json` config block must equal the code's defaults exactly)
-- a file or folder the code creates or reads under `~/.claude/radio`
+- a file or folder the code creates or reads under `~/.claude/terminal-fm`
 - a default behaviour, number, limit, fallback, or message a user would notice
 - anything an example in the README relies on (every example must run as written against the current grammar)
 

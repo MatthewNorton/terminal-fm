@@ -11,7 +11,7 @@ news, idle announcements); nothing here writes text, so every word spoken is wha
 Engine order: Kokoro-82M (kokoro_tts.py, run in an interpreter that has kokoro_onnx) > Piper >
 macOS `say` > Windows SAPI > espeak. Which one spoke, and why, is appended to dj_engine.log.
 
-Data directory: ~/.claude/radio, or $AI_RADIO_HOME. Voice settings live in config.json under "dj".
+Data directory: ~/.claude/terminal-fm, or $TERMINAL_FM_HOME. Voice settings live in config.json under "dj".
 """
 
 import json
@@ -23,8 +23,8 @@ import time
 from pathlib import Path
 
 CODE_DIR = Path(__file__).resolve().parent               # kokoro_tts.py lives next to this file
-ROOT = Path(os.path.expanduser(os.environ.get("AI_RADIO_HOME", "").strip()
-                               or str(Path.home() / ".claude" / "radio")))
+ROOT = Path(os.path.expanduser(os.environ.get("TERMINAL_FM_HOME", "").strip()
+                               or str(Path.home() / ".claude" / "terminal-fm")))
 CONFIG_FILE = ROOT / "config.json"
 KOKORO_DIR = ROOT / "kokoro"                              # kokoro-v1.0.*.onnx + voices-v1.0.bin
 TMP_WAV = ROOT / "_dj.wav"                                # shared scratch (Piper only)
@@ -170,11 +170,13 @@ def _cleanup_tmp():
 _kokoro_last = ""
 
 
+KOKORO_MODELS = ("kokoro-v1.0.fp16.onnx", "kokoro-v1.0.onnx", "kokoro-v1.0.int8.onnx")
+KOKORO_VOICES = "voices-v1.0.bin"
+
+
 def kokoro_files_present():
     """The Kokoro model and voices are downloaded (README: Optional extras). `radio setup` asks too."""
-    return ((KOKORO_DIR / "voices-v1.0.bin").exists() and any(
-        (KOKORO_DIR / m).exists() for m in
-        ("kokoro-v1.0.fp16.onnx", "kokoro-v1.0.onnx", "kokoro-v1.0.int8.onnx")))
+    return (KOKORO_DIR / KOKORO_VOICES).exists() and any((KOKORO_DIR / m).exists() for m in KOKORO_MODELS)
 
 
 def _kokoro_render(text):

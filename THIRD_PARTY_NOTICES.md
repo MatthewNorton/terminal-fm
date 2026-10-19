@@ -2,7 +2,7 @@
 
 Terminal FM itself is MIT-licensed (see `LICENSE`). **This repository bundles no third-party code, model weights or tokenizers.** Everything below is optional, is downloaded by you, and is governed by its own license, which you accept when you download it. The radio degrades gracefully without each item (see `README.md`, Requirements).
 
-`<data dir>` below is the radio's data directory: `~/.claude/radio` by default, or the folder named by the `AI_RADIO_HOME` environment variable.
+`<data dir>` below is the radio's data directory: `~/.claude/terminal-fm` by default, or the folder named by the `TERMINAL_FM_HOME` environment variable.
 
 License names were checked against the linked pages on 2026-09-28. Licenses change; the page you download from is authoritative, not this file.
 
