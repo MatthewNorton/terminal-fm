@@ -209,6 +209,66 @@ class PythonMinimum(unittest.TestCase):
         self.assertEqual(re.findall(r'python: \["([\d.]+)"', ci), [low])
 
 
+class VoicePython(SetupCase):
+    # kokoro-onnx caps the voice at PY_VOICE_MAX, below the Python the install commands name, so
+    # `setup voice` and README's DJ voice steps must both state that limit, and the way round it.
+    PIP = "pip install -U kokoro-onnx soundfile"
+
+    def page(self, done, is_win=True, platform="win32"):
+        with mock.patch.object(radio, "IS_WIN", is_win), mock.patch.object(radio.sys, "platform", platform):
+            return run(radio._voice_page, done)[1]
+
+    def test_both_branches_state_the_limit_and_the_way_round_it(self):
+        top = "%d.%d" % radio.PY_VOICE_MAX
+        for done in (False, True):
+            for is_win, platform in ((True, "win32"), (False, "darwin"), (False, "linux")):
+                with self.subTest(done=done, platform=platform):
+                    out = self.page(done, is_win, platform)
+                    lines = out.splitlines()
+                    self.assertIn(f"They need Python {top} or older:", out)
+                    self.assertIn(own_line(self.PIP), lines)
+                    py = f"py -{top}" if is_win else f"python{top}"
+                    self.assertIn(own_line(f"{py} -m {self.PIP}"), lines)
+                    self.assertIn(own_line(str(radio.CONFIG_FILE)), lines)
+                    self.assertIn("Set dj.python to that path", out)
+
+    def test_page_is_built_from_the_constant(self):
+        patch(self, "PY_VOICE_MAX", new=(4, 2))
+        for done in (False, True):
+            with self.subTest(done=done):
+                out = self.page(done)
+                self.assertIn("They need Python 4.2 or older:", out)
+                self.assertIn("On Python 4.3 or newer, give the voice its own Python 4.2:", out)
+                self.assertIn(own_line("winget install Python.Python.4.2"), out.splitlines())
+                self.assertIn(own_line(f"py -4.2 -m {self.PIP}"), out.splitlines())
+                self.assertNotIn("3.13", out)
+
+    def test_printed_path_works_as_dj_python(self):
+        # Pasted into config.json as printed: a C:\ path would be invalid JSON there, and the radio
+        # would then ignore the whole file.
+        line = next(ln for ln in self.page(False).splitlines() if ln.startswith(own_line("py -")) and " -c " in ln)
+        code = line.split(" -c ", 1)[1].strip('"')
+        printed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                                 timeout=60).stdout.strip()
+        self.assertNotIn("\\", printed)
+        radio.CONFIG_FILE.write_text('{"dj": {"python": "%s"}}' % printed, encoding="utf-8")
+        import dj
+        self.assertEqual(dj._kokoro_python(dj.dj_config()), printed)
+
+    def test_readme_states_the_same_limit_and_command(self):
+        top = "%d.%d" % radio.PY_VOICE_MAX
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        voice = re.search(r"^### DJ voice$(.*?)^##", readme, re.S | re.M).group(1)
+        self.assertIn(f"Python {top} or older", voice)
+        cmd = f"py -{top} -m {self.PIP}"
+        self.assertIn(own_line(cmd), self.page(False).splitlines())
+        self.assertIn(f"`{cmd}`", voice)
+        for doc in ("README.md", "skills/tfm/SKILL.md"):         # nothing anywhere states another limit
+            text = (REPO / doc).read_text(encoding="utf-8")
+            self.assertLessEqual(set(re.findall(r"Python (\d+\.\d+) or older", text)), {top}, doc)
+            self.assertLessEqual(set(re.findall(r"\bpy -(\d+\.\d+)", text)), {top}, doc)
+
+
 class DefaultDataFolder(unittest.TestCase):
     def test_every_file_defaults_to_the_same_folder(self):
         # radio.py, dj.py, kokoro_tts.py and statusline.py each work out the data folder (statusline.py

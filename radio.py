@@ -773,9 +773,12 @@ def _print_key_help(lead):
 # The oldest Python that still gets security fixes: 3.10 reached end of life on 2026-10-01
 # (devguide.python.org/versions). hooks/radio-hook.sh refuses anything older; a test keeps them equal.
 PY_MIN = (3, 11)
-# The Python the install commands name: the newest that winget packages and that onnxruntime (which
-# the Kokoro voice needs) ships builds for. Both stopped at 3.14 on 2026-10-19.
+# The Python the install commands name: the newest that winget packages (3.14 on 2026-10-19).
 PY_INSTALL = "3.14"
+# The newest Python the optional Kokoro voice installs on. Every kokoro-onnx release from 0.4.8 to
+# 0.6.1, the newest, requires Python <3.14 (PyPI, checked 2026-10-19), so pip on 3.14 quietly
+# installs 0.4.7, older than the 0.6 the voice needs. `setup voice` and README's DJ voice say so.
+PY_VOICE_MAX = (3, 13)
 
 
 def _install_cmd(program="player"):
@@ -1940,20 +1943,32 @@ def _statusline_page(done):
 
 def _voice_page(done):
     import dj
+    top, newer = "%d.%d" % PY_VOICE_MAX, "%d.%d" % (PY_VOICE_MAX[0], PY_VOICE_MAX[1] + 1)
     pip = "pip install -U kokoro-onnx soundfile"
+    need = f"They need Python {top} or older:"
     print("DJ voice: Kokoro-82M, a natural voice for the DJ. Without it the DJ uses your system voice.")
     if done:
-        print(f"Status: model files found. If the DJ still sounds robotic, run this in a terminal:"
-              f"\n\n{STEP_INDENT}{pip}")
-        return
-    print("Status: not installed.\n")
-    print(_steps([(f"Download {dj.KOKORO_MODELS[0]} and {dj.KOKORO_VOICES} from:",
-                   "https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1"),
-                  ("Put both files in this folder:", str(dj.KOKORO_DIR)),
-                  ("Install its Python packages in a terminal:", pip)], again="/tfm setup voice"))
-    if sys.platform.startswith("linux") and not any(
-            shutil.which(t) for t in ("piper", "espeak-ng", "espeak")):
-        print("  No system voice was found either. For a basic one: sudo apt install espeak-ng")
+        print(f"Status: model files found. If the DJ still sounds robotic, install its Python packages"
+              f" in a terminal. {need}\n\n{STEP_INDENT}{pip}")
+    else:
+        print("Status: not installed.\n")
+        print(_steps([(f"Download {dj.KOKORO_MODELS[0]} and {dj.KOKORO_VOICES} from:",
+                       "https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1"),
+                      ("Put both files in this folder:", str(dj.KOKORO_DIR)),
+                      (f"Install its Python packages in a terminal. {need}", pip)], again="/tfm setup voice"))
+        if sys.platform.startswith("linux") and not any(
+                shutil.which(t) for t in ("piper", "espeak-ng", "espeak")):
+            print("  No system voice was found either. For a basic one: sudo apt install espeak-ng")
+    # On a newer Python the packages go into a second one, which dj.python names: dj.py's probe tries
+    # only its own interpreter and whatever python, python3 and py run. The path prints with / because
+    # a pasted C:\ path is invalid JSON, and load_config then ignores the whole of config.json.
+    py = f"py -{top}" if IS_WIN else f"python{top}"
+    code = "import pathlib, sys; print(pathlib.Path(sys.executable).as_posix())"
+    steps = [("Install the packages with it:", f"{py} -m {pip}"), ("Print its path:", f'{py} -c "{code}"'),
+             ("Set dj.python to that path in this file, or ask Claude to:", str(CONFIG_FILE))]
+    if IS_WIN:
+        steps.insert(0, (f"Install Python {top}, if you don't have it:", f"winget install Python.Python.{top}"))
+    print(f"\nOn Python {newer} or newer, give the voice its own Python {top}:\n\n{_steps(steps)}")
 
 
 def _enhancer_page(done):
