@@ -3,6 +3,7 @@ the hook launcher's note when no Python is found, and the statusline: the Sessio
 statusline.py and the `>` that marks a playing track."""
 
 import ast
+import contextlib
 import json
 import os
 import re
@@ -17,7 +18,18 @@ from unittest import mock
 
 from radio_test_support import REPO, own_line, patch, radio, reset_home, run
 
+import dj  # noqa: E402  (after radio_test_support, which points TERMINAL_FM_HOME at the test home)
+
 HOOK = REPO / "hooks" / "radio-hook.sh"
+OSES = ("win32", "darwin", "linux")
+
+
+@contextlib.contextmanager
+def on_os(platform):
+    """radio as it runs on `platform`, one of OSES: IS_WIN and sys.platform to match."""
+    with mock.patch.object(radio, "IS_WIN", platform == "win32"), \
+            mock.patch.object(radio.sys, "platform", platform):
+        yield
 
 
 class SetupCase(unittest.TestCase):
@@ -106,11 +118,14 @@ class Setup(SetupCase):
         self.assertIn(own_line(radio._install_cmd("ffmpeg")[1]), out.splitlines())
 
     def test_install_commands_on_every_os(self):
-        for is_win, platform in ((True, "win32"), (False, "darwin"), (False, "linux")):
-            with self.subTest(platform=platform), mock.patch.object(radio, "IS_WIN", is_win), \
-                    mock.patch.object(radio.sys, "platform", platform):
+        python = {"win32": (f"winget install Python.Python.{radio.PY_INSTALL}", "winget install Python.Python.3.13"),
+                  "darwin": ("brew install python", "brew install python@3.13"),
+                  "linux": ("sudo apt install python3", "")}        # no one command for another version
+        for platform in OSES:
+            with self.subTest(platform=platform), on_os(platform):
                 self.assertIn("ffmpeg", radio._install_cmd("ffmpeg")[1].lower())
-                self.assertIn("python", radio._install_cmd("python")[1].lower())
+                self.assertEqual((radio._install_cmd("python")[1], radio._install_cmd("python", "3.13")[1]),
+                                 python[platform])
                 self.assertIn(radio._install_cmd()[1], radio._install_hint())
 
     def test_old_python_is_a_step(self):
@@ -209,81 +224,53 @@ class PythonMinimum(unittest.TestCase):
         self.assertEqual(re.findall(r'python: \["([\d.]+)"', ci), [low])
 
 
-class VoicePython(SetupCase):
-    # kokoro-onnx caps the voice at PY_VOICE_MAX, below the Python the install commands name. A Python
-    # that fits gets the pip step; a newer one gets steps for a second Python in its place. The limit
-    # is patched, as test_old_python_is_a_step patches PY_MIN, so the Python running this can't matter.
+class VoicePython(unittest.TestCase):
+    # kokoro-onnx caps the voice at dj.PY_VOICE_MAX, below the Python the install commands name: a
+    # Python that fits gets the pip step, a newer one the steps for a second Python in its place. The
+    # limit is patched, as test_old_python_is_a_step patches PY_MIN, so the Python running this can't
+    # matter. readme_check.py holds README and the skill to the real limit.
     PIP = 'pip install -U "kokoro-onnx>=0.6" soundfile'
     AGAIN = "Run /tfm setup voice again to check."
-    FITS, TOO_NEW = (99, 0), (3, 0)
-    OSES = ((True, "win32"), (False, "darwin"), (False, "linux"))
 
-    def page(self, done, limit, is_win=True, platform="win32"):
-        with mock.patch.object(radio, "PY_VOICE_MAX", limit), mock.patch.object(radio, "IS_WIN", is_win), \
-                mock.patch.object(radio.sys, "platform", platform):
+    def page(self, done, limit, platform=sys.platform):
+        with mock.patch.object(dj, "PY_VOICE_MAX", limit), on_os(platform), \
+                mock.patch.object(radio.shutil, "which", return_value=None):     # no PATH scan for espeak
             return run(radio._voice_page, done)[1]
 
     def test_a_python_that_fits_gets_only_the_pip_step(self):
+        cmd = own_line(f"{radio._cmdline([radio._console_python()], call=True)} -m {self.PIP}")
         for done in (False, True):
-            for is_win, platform in self.OSES:
-                with self.subTest(done=done, platform=platform):
-                    out = self.page(done, self.FITS, is_win, platform)
-                    lines = out.splitlines()
-                    self.assertIn("Install its Python packages in a terminal. They need Python 99.0 or older:", out)
-                    self.assertIn(own_line(self.PIP), lines)
-                    self.assertNotIn("dj.python", out)
-                    self.assertEqual(self.AGAIN in out, not done)               # only before the download
-                    self.assertEqual(f"  4. {self.AGAIN}" in lines, not done)    # one list
-                    self.assertNotIn("  5. ", out)
+            with self.subTest(done=done):
+                out = self.page(done, (99, 0))
+                lines = out.splitlines()
+                self.assertIn("Install its Python packages in a terminal. They need Python 99.0 or older:", out)
+                self.assertIn(cmd, lines)                                # pip in the Python just checked
+                self.assertEqual(self.AGAIN in out, not done)            # only before the download
+                self.assertEqual(f"  4. {self.AGAIN}" in lines, not done)
+                self.assertNotIn("  5. ", out)                           # one list, nothing else
+
+    def test_fits_quotes_a_program_path_with_a_space(self):
+        with mock.patch.object(radio.sys, "executable", "C:/Program Files/Python312/pythonw.exe"):
+            out = self.page(False, (99, 0), "win32")
+        self.assertIn(own_line(f'& "C:/Program Files/Python312/python.exe" -m {self.PIP}'), out.splitlines())
 
     def test_a_newer_python_gets_a_second_python_instead(self):
         why = f"Its Python packages need Python 3.0 or older, and this is Python {sys.version.split()[0]}."
-        first = {"win32": "winget install Python.Python.3.0", "darwin": "brew install python@3.0"}
+        get = {"win32": "winget install Python.Python.3.0", "darwin": "brew install python@3.0"}
         for done in (False, True):
-            for is_win, platform in self.OSES:
+            for platform in OSES:
                 with self.subTest(done=done, platform=platform):
-                    out = self.page(done, self.TOO_NEW, is_win, platform)
+                    out = self.page(done, (3, 0), platform)
                     lines = out.splitlines()
                     self.assertIn(why, out)
-                    self.assertNotIn(own_line(self.PIP), lines)              # replaced, not followed
-                    py = "py -3.0" if is_win else "python3.0"
-                    for line in (f"{py} -m {self.PIP}", str(radio.CONFIG_FILE)):
-                        self.assertIn(own_line(line), lines)
-                    for os_name, cmd in first.items():
+                    py = "py -3.0" if platform == "win32" else "python3.0"
+                    self.assertEqual([ln for ln in lines if " -m pip " in ln],
+                                     [own_line(f"{py} -m {self.PIP}")])          # replaced, not followed
+                    for os_name, cmd in get.items():
                         self.assertEqual(own_line(cmd) in lines, os_name == platform)
                     self.assertEqual("with your system's package manager" in out, platform == "linux")
                     self.assertEqual(self.AGAIN in out, not done)
-                    self.assertEqual(f"  7. {self.AGAIN}" in lines, not done)
-
-    def test_printed_path_works_as_dj_python(self):
-        # Pasted into config.json as printed: a C:\ path would be invalid JSON there, and the radio
-        # would then ignore the whole file.
-        line = next(ln for ln in self.page(False, self.TOO_NEW).splitlines()
-                    if ln.startswith(own_line("py -")) and " -c " in ln)
-        code = line.split(" -c ", 1)[1].strip('"')
-        printed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                                 timeout=60).stdout.strip()
-        self.assertNotIn("\\", printed)
-        radio.CONFIG_FILE.write_text('{"dj": {"python": "%s"}}' % printed, encoding="utf-8")
-        import dj
-        self.assertEqual(dj._kokoro_python(dj.dj_config()), printed)
-
-    def test_readme_states_the_same_limit_and_commands(self):
-        top = "%d.%d" % radio.PY_VOICE_MAX
-        readme = (REPO / "README.md").read_text(encoding="utf-8")
-        voice = re.search(r"^### DJ voice$(.*?)^##", readme, re.S | re.M).group(1)
-        needs = re.search(r"^### Requirements$(.*?)^### ", readme, re.S | re.M).group(1)
-        for section in (voice, needs):
-            self.assertIn(f"Python {top} or older", section)
-        self.assertIn("(#dj-voice)", needs)
-        for cmd in (self.PIP, f"py -{top} -m {self.PIP}"):                  # what the page prints
-            self.assertIn(f"`{cmd}`", voice)
-        for doc in ("README.md", "skills/tfm/SKILL.md"):         # nothing anywhere states another limit
-            text = (REPO / doc).read_text(encoding="utf-8")
-            self.assertLessEqual(set(re.findall(r"Python (\d+\.\d+) or older", text)), {top}, doc)
-            self.assertLessEqual(set(re.findall(r"\bpy -(\d+\.\d+)", text)), {top}, doc)
-            self.assertLessEqual(set(re.findall(r"pip install -U (\S+) soundfile", text)),
-                                 {'"kokoro-onnx>=0.6"'}, doc)
+                    self.assertEqual(f"  5. {self.AGAIN}" in lines, not done)
 
 
 class DefaultDataFolder(unittest.TestCase):
@@ -383,9 +370,8 @@ class HookLauncher(unittest.TestCase):
         r = self.launch("SessionStart", "no-such-python-a no-such-python-b")
         self.assertEqual(r.returncode, 0)
         note = json.loads(r.stdout)
-        for is_win, platform in ((True, "win32"), (False, "darwin"), (False, "linux")):
-            with self.subTest(platform=platform), mock.patch.object(radio, "IS_WIN", is_win), \
-                    mock.patch.object(radio.sys, "platform", platform):
+        for platform in OSES:
+            with self.subTest(platform=platform), on_os(platform):
                 self.assertIn(radio._install_cmd("python")[1], note["systemMessage"])
         ctx = note["hookSpecificOutput"]
         self.assertEqual(ctx["hookEventName"], "SessionStart")

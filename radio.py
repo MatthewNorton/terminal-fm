@@ -775,19 +775,18 @@ def _print_key_help(lead):
 PY_MIN = (3, 11)
 # The Python the install commands name: the newest that winget packages (3.14 on 2026-10-19).
 PY_INSTALL = "3.14"
-# The newest Python the optional Kokoro voice installs on: every kokoro-onnx release from 0.4.8 to
-# 0.6.1, the newest, requires Python <3.14 (PyPI, checked 2026-10-19). The pip commands pin >=0.6,
-# the version the voice needs, so pip on 3.14 refuses instead of quietly taking 0.4.7.
-PY_VOICE_MAX = (3, 13)
 
 
-def _install_cmd(program="player"):
+def _install_cmd(program="player", version=PY_INSTALL):
     """(name, install command) for an audio player, or with "ffmpeg" FFmpeg itself, or with "python"
-    Python, on this OS."""
+    Python `version`, on this OS. Linux has one command only for the distro's own Python, so any
+    other version gets ""."""
     if program == "python":
         if IS_WIN:
-            return "Python", f"winget install Python.Python.{PY_INSTALL}"
-        return "Python", "brew install python" if sys.platform == "darwin" else "sudo apt install python3"
+            return "Python", f"winget install Python.Python.{version}"
+        if sys.platform == "darwin":
+            return "Python", "brew install python" if version == PY_INSTALL else f"brew install python@{version}"
+        return "Python", "sudo apt install python3" if version == PY_INSTALL else ""
     if IS_WIN:
         return "FFmpeg", "winget install Gyan.FFmpeg"
     if sys.platform == "darwin":
@@ -1941,31 +1940,27 @@ def _statusline_page(done):
         print('  Or ask Claude: "add the Terminal FM statusline to my settings".')
 
 
+# pip's arguments for the voice's packages. 0.6 is the kokoro-onnx the voice needs, so on a Python
+# no such release supports, pip refuses instead of quietly taking an older one; the double quotes
+# keep the > from being a redirect in bash, PowerShell and cmd. readme_check.py holds README to it.
+KOKORO_PIP_ARGS = 'install -U "kokoro-onnx>=0.6" soundfile'
+
+
 def _voice_page(done):
-    """The voice's steps. Its packages install on Python PY_VOICE_MAX or older, so a newer Python
-    gets steps for a second Python that old instead, which dj.python names: dj.py's probe tries
-    only its own interpreter and whatever python, python3 and py run."""
     import dj
-    top = "%d.%d" % PY_VOICE_MAX
-    pip = 'pip install -U "kokoro-onnx>=0.6" soundfile'      # quoted: > redirects in every shell
-    if sys.version_info[:2] <= PY_VOICE_MAX:
-        steps = [(f"Install its Python packages in a terminal. They need Python {top} or older:", pip)]
-    else:
-        why = f"Its Python packages need Python {top} or older, and this is Python {sys.version.split()[0]}."
-        get = f"Install Python {top}, if you don't have it:"
-        if IS_WIN:
-            steps = [(f"{why} {get}", f"winget install Python.Python.{top}")]
-        elif sys.platform == "darwin":                  # a homebrew/core formula (checked 2026-10-19)
-            steps = [(f"{why} {get}", f"brew install python@{top}")]
-        else:
-            steps = [f"{why} Install a Python {top} with your system's package manager, if you don't have one."]
-        # The path prints with / because a pasted C:\ path is invalid JSON, and load_config then
-        # ignores the whole of config.json.
-        py = f"py -{top}" if IS_WIN else f"python{top}"
-        code = "import pathlib, sys; print(pathlib.Path(sys.executable).as_posix())"
-        steps += [("Install the packages with it:", f"{py} -m {pip}"),
-                  ("Print its path:", f'{py} -c "{code}"'),
-                  ("Set dj.python to that path in this file, or ask Claude to:", str(CONFIG_FILE))]
+    top = "%d.%d" % dj.PY_VOICE_MAX
+    if sys.version_info[:2] <= dj.PY_VOICE_MAX:          # pip runs in the very Python just checked
+        steps, pip = [], _cmdline([_console_python(), "-m", "pip"], call=True)
+        title = f"Install its Python packages in a terminal. They need Python {top} or older:"
+    else:                                                # a second Python, which dj.py finds by itself
+        get = _install_cmd("python", top)[1]
+        how = (", if you don't have it:" if get
+               else " with your system's package manager, if you don't have it.")
+        steps = [(f"Its Python packages need Python {top} or older, and this is Python"
+                  f" {sys.version.split()[0]}. Install Python {top}{how}", get)]
+        pip = (f"py -{top}" if IS_WIN else f"python{top}") + " -m pip"
+        title = "Install the packages with it:"
+    steps.append((title, f"{pip} {KOKORO_PIP_ARGS}"))
     print("DJ voice: Kokoro-82M, a natural voice for the DJ. Without it the DJ uses your system voice.")
     if done:
         print(f"Status: model files found. If the DJ still sounds robotic:\n\n{_steps(steps)}")

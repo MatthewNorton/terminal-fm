@@ -14,6 +14,7 @@ macOS `say` > Windows SAPI > espeak. Which one spoke, and why, is appended to dj
 Data directory: ~/.claude/terminal-fm, or $TERMINAL_FM_HOME. Voice settings live in config.json under "dj".
 """
 
+import itertools
 import json
 import os
 import shutil
@@ -111,9 +112,9 @@ def _kokoro_python(cfg):
 
     The daemon/hook may be launched by an interpreter that lacks kokoro_onnx, which silently
     dropped the DJ to the robotic SAPI voice. Instead of trusting whoever launched us, locate
-    ANY interpreter that can actually run Kokoro (current one, its python.exe sibling, then PATH)
-    and reuse it. The cache is validated by existence only (fast) and self-heals: a failed render
-    clears it so the next call re-probes.
+    ANY interpreter that can actually run Kokoro (current one, its python.exe sibling, then PATH,
+    then Pythons installed beside those) and reuse it. The cache is validated by existence only
+    (fast) and self-heals: a failed render clears it so the next call re-probes.
     """
     cfgpy = cfg.get("python")                          # 1) explicit override: dj.python in config
     if cfgpy and Path(str(cfgpy)).exists():
@@ -136,7 +137,7 @@ def _kokoro_python(cfg):
         if w:
             cands.append(w)
     seen = set()
-    for c in cands:
+    for c in itertools.chain(cands, _side_by_side()):    # 4) the side-by-side ones, only after those
         cl = c.lower()
         if not cl or cl in seen:
             continue
@@ -172,6 +173,34 @@ _kokoro_last = ""
 
 KOKORO_MODELS = ("kokoro-v1.0.fp16.onnx", "kokoro-v1.0.onnx", "kokoro-v1.0.int8.onnx")
 KOKORO_VOICES = "voices-v1.0.bin"
+# The Pythons the voice's packages install on: every kokoro-onnx release from 0.4.8 to 0.6.1, the
+# newest, requires >=3.10,<3.14 (PyPI, checked 2026-10-19). `radio setup voice` names the newest,
+# and readme_check.py holds README and the skill to it.
+PY_VOICE_MAX = (3, 13)
+PY_VOICE_MIN = (3, 10)
+
+
+def _side_by_side():
+    """Pythons installed beside the default one, newest first from PY_VOICE_MAX to PY_VOICE_MIN: on
+    Windows the interpreter each `py -3.X` runs, as a path the cache can keep (that legacy form never
+    installs a missing runtime once any is installed, unlike `py exec`), elsewhere python3.X on PATH."""
+    launcher = shutil.which("py") if IS_WIN else None
+    for minor in range(PY_VOICE_MAX[1], PY_VOICE_MIN[1] - 1, -1):
+        ver = f"{PY_VOICE_MAX[0]}.{minor}"
+        if not IS_WIN:
+            found = shutil.which(f"python{ver}")
+        elif launcher:
+            try:
+                r = subprocess.run([launcher, f"-{ver}", "-c",
+                                    "import sys; sys.stdout.buffer.write(sys.executable.encode())"],
+                                   capture_output=True, timeout=10, creationflags=CREATE_NO_WINDOW)
+                found = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else None
+            except Exception:
+                found = None
+        else:
+            return
+        if found:
+            yield found
 
 
 def kokoro_files_present():
