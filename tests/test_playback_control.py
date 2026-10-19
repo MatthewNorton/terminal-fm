@@ -264,16 +264,39 @@ class KeyShow(unittest.TestCase):
                 raise PermissionError("in use")
             return real_replace(src, dst)
 
-        with mock.patch.object(radio.os, "replace", side_effect=refuse_first):
+        # The fallback must stay owner-only too: _atomic_write creates files under the umask, which
+        # wrote the key readable by other users until the chmod that followed.
+        with mock.patch.object(radio.os, "replace", side_effect=refuse_first), \
+                mock.patch.object(radio, "_atomic_write") as general_writer:
             self.typed_key("new-key-not-real")
+        general_writer.assert_not_called()
         self.assertEqual(radio.KEY_FILE.read_text(encoding="utf-8"), "new-key-not-real")
         self.assertEqual(list(radio.ROOT.glob(".key.*.tmp")), [])
+        if os.name != "nt":
+            self.assertEqual(stat.S_IMODE(radio.KEY_FILE.stat().st_mode), 0o600)
 
     def test_stored_key_has_no_hint(self):
         radio.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
         _, out = run(radio.cmd_key, ["show"])
         self.assertEqual(len(out.strip().splitlines()), 1)
         self.assertIn("source: .key file", out)
+
+    def test_show_prints_none_of_the_key(self):
+        # `key show` output reaches scrollback and Claude's transcript; it used to print 6 characters.
+        key = "sk-Zq9x-not-real-7Wv4"
+        for source in (".key file", "STABILITY_API_KEY"):
+            with self.subTest(source=source):
+                reset_home()
+                os.environ.pop("STABILITY_API_KEY", None)
+                if source == ".key file":
+                    radio.KEY_FILE.write_text(key, encoding="utf-8")
+                else:
+                    os.environ["STABILITY_API_KEY"] = key
+                _, out = run(radio.cmd_key, ["show"])
+                self.assertIn("Key: set", out)
+                self.assertIn(f"source: {source}", out)
+                for part in (key[:6], key[3:7], key[-4:]):
+                    self.assertNotIn(part, out)
 
 
 if __name__ == "__main__":

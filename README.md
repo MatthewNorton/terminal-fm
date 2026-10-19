@@ -275,7 +275,7 @@ New tracks join the shuffle without a restart.
 | `setup` | `se` | The checklist, then the next step spelled out. It changes nothing. |
 | `setup statusline` / `voice` / `enhancer` / `tokens` | | The steps to add that extra, with your paths. |
 | `key` | `k` | Store your API key, typed at a hidden prompt. That needs your own terminal, so in Claude Code it prints the command to run there. |
-| `key show` | | The key's first 6 characters, and where it came from. |
+| `key show` | | Whether a key is set and where it came from. It never shows any of the key. |
 | `key clear` | | Delete the stored key. `delete` and `remove` work too. |
 
 The key is saved to `~/.claude/terminal-fm/.key`, readable only by you on macOS and Linux. A stored key wins over `STABILITY_API_KEY`. The key is never accepted as a command-line argument.

@@ -182,7 +182,7 @@ def _write_private(path, text):
     is created with that mode, never with the umask's default, and then renamed into place: the
     key used to be written world-readable under a typical umask and chmod-ed only afterwards.
     Windows ignores the mode (the file inherits the folder's permissions), and when it refuses the
-    rename this falls back to _atomic_write's direct write."""
+    rename this writes the target directly, still through a 0600 descriptor."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     _unlink_quiet(tmp)                  # O_EXCL below: never reuse a file someone else created
     try:
@@ -192,7 +192,15 @@ def _write_private(path, text):
         os.replace(tmp, path)
     except OSError:
         _unlink_quiet(tmp)
-        _atomic_write(path, text)
+        # Security: not _atomic_write, whose write_text creates files with the umask's mode
+        # (readable by other users on a typical system) and so left the key exposed until the
+        # chmod below. O_CREAT's mode only applies to a new file, so an existing one (a key from
+        # an older version) is tightened before the key goes in; Windows has no fchmod before 3.13.
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            fh.write(text)
     try:
         os.chmod(path, 0o600)           # also tightens a key file left by an older version
     except OSError:
@@ -2406,7 +2414,8 @@ def cmd_key(args):
 
     radio key             prompt for the key (hidden input, never on the command line or in
                           shell history) and save it to <data dir>/.key, owner-readable only
-    radio key show        the first 6 characters, and whether STABILITY_API_KEY is also set
+    radio key show        whether a key is set and where it came from (never any of its
+                          characters), and whether STABILITY_API_KEY is also set
     radio key clear       delete the stored key
     """
     sub = args[0].lower() if args else ""
@@ -2415,7 +2424,10 @@ def cmd_key(args):
         src = ".key file" if KEY_FILE.exists() and KEY_FILE.read_text(encoding="utf-8").strip() \
             else ("STABILITY_API_KEY" if k else "none")
         env = "set" if os.environ.get("STABILITY_API_KEY", "").strip() else "not set"
-        print(f"Key: {k[:6] + '…' if k else '(none)'}   source: {src}   STABILITY_API_KEY: {env}")
+        # Security: say whether there is a key, never print any of it. This output ends up in
+        # terminal scrollback and, when Claude runs `key show`, in its session transcript; it used
+        # to print the key's first 6 characters.
+        print(f"Key: {'set' if k else '(none)'}   source: {src}   STABILITY_API_KEY: {env}")
         if not k:
             _print_key_help("To add one:")
         return
