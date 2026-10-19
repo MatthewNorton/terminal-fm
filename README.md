@@ -1,6 +1,6 @@
 # Terminal FM
 
-https://github.com/user-attachments/assets/4c59283a-45e1-4ced-890c-ee128460a36d
+https://github.com/user-attachments/assets/24f664ad-429b-4580-86bf-4ae5383ff785
 
 **Demo:** 67 seconds of setup, making a track, the DJ and a skip. It starts muted, so turn the sound on. The parts on their own: [a generated track](examples/lofi-hip-hop-track.mp3), [the DJ voice](examples/dj-voice.wav) and [the video file](examples/terminal-fm-demo.mp4).
 
