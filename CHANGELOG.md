@@ -6,7 +6,7 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 ### Fixed
 
-- `setup voice` and README's DJ voice steps now say the voice's Python packages need Python 3.13 or older, and how to give the voice its own Python 3.13 on a newer one (`py -3.13` on Windows, then `dj.python` in `config.json`). Every kokoro-onnx release since 0.4.8 requires a Python older than 3.14, so on 3.14 `pip install -U kokoro-onnx soundfile` quietly installed 0.4.7, too old for the voice, and README had told Python 3.15 users to use a 3.14 instead.
+- The DJ voice needs Python 3.13 or older: every kokoro-onnx release since 0.4.8 requires a Python older than 3.14, so on 3.14 `pip install -U kokoro-onnx soundfile` quietly installed 0.4.7, too old for the voice, and README told Python 3.15 users to use a 3.14. README's Requirements and DJ voice steps now say so, and every pip command `setup voice` and README print pins `"kokoro-onnx>=0.6"`, so pip on a newer Python refuses instead. On a newer Python, `setup voice` gives the steps for a separate Python 3.13 in place of the pip step (`py -3.13` on Windows, `brew install python@3.13` on macOS) and points the voice at it with `dj.python`.
 
 ### Security
 

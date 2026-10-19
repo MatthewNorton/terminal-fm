@@ -27,6 +27,8 @@ Check each one in a terminal (PowerShell on Windows). If a check fails, run the 
 
 **Why 3.11:** it's the oldest Python that still gets security fixes. `setup` flags anything older.
 
+**Want the DJ voice?** The optional [DJ voice](#dj-voice) needs Python 3.13 or older, so install 3.13 rather than a newer Python.
+
 **Which player plays:** First found wins: `mpv` › `ffplay` › `afplay` (macOS) › `mpg123` › `cvlc`. Only `mpv`, `ffplay` and `cvlc` can resume a paused or interrupted track mid-song; the others restart it from the top.
 
 ### Steps
@@ -103,11 +105,11 @@ Everything works without these. Each extra has a setup page, `/tfm setup <name>`
 
 ### DJ voice
 
-The voice's Python packages need Python 3.13 or older, though the radio itself runs on newer ones.
+The voice's Python packages need Python 3.13 or older, though the radio itself runs on newer ones. `/tfm setup voice` shows the steps for the Python you have.
 
 1. Download `kokoro-v1.0.fp16.onnx` and `voices-v1.0.bin` from <https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1>.
 2. Put both files in `~/.claude/terminal-fm/kokoro/`.
-3. In a terminal, run `pip install -U kokoro-onnx soundfile` (kokoro-onnx 0.6 or newer). On a newer Python, pip can't install that version, so install the packages with a Python 3.13 instead (on Windows, `py -3.13 -m pip install -U kokoro-onnx soundfile`) and set `dj.python` in `config.json` to that Python's path, written with `/`.
+3. In a terminal, run `pip install -U "kokoro-onnx>=0.6" soundfile`. On a newer Python, pip refuses it, so install the packages with a Python 3.13 instead (on Windows, `py -3.13 -m pip install -U "kokoro-onnx>=0.6" soundfile`) and set `dj.python` in `config.json` to that Python's path, written with `/`.
 
 The radio finds a Python that has these packages by itself. To pin one, set `dj.python` in `config.json`. On Linux without a system voice, `sudo apt install espeak-ng` gives a basic one.
 
