@@ -11,7 +11,7 @@ Rules for any agent changing this folder (Claude Code, Codex, or anything else).
 - a subcommand, an alias, or a keyword a command accepts (`clear`, `all`, `auto`, the on/off words, …)
 - a flag (`play --say`, `dj.py --file`, `kokoro_tts.py --voice`, …)
 - a config key or default value (README's `json` config block must equal the code's defaults exactly)
-- a file or folder the code creates or reads under `~/.claude/radio`
+- a file or folder the code creates or reads under `~/.claude/terminal-fm`
 - a default behaviour, number, limit, fallback, or message a user would notice
 - anything an example in the README relies on (every example must run as written against the current grammar)
 
@@ -29,7 +29,7 @@ python readme_check.py --confirm    # only after README.md reflects them
 ```
 
 - **Start of a session:** run `python readme_check.py` before editing. "Unreviewed" there means someone changed the code without updating the README, whether by hand or from another session. Reconcile that first. In a fresh clone there is no snapshot yet (`.readme_sync/` is never committed), so every watched file shows as unreviewed: check that drift is none, then run `--confirm` once.
-- **Layer 1, drift, is mechanical.** Facts pulled from the code (commands, keywords, config, files, flags, player order, duration rules, `/tfm` skill coverage) must appear in README. Fix README until it reports none. If the check itself is wrong, fix `readme_check.py`; that's a watched file, so document that change too.
+- **Layer 1, drift, is mechanical.** Facts pulled from the code (commands, keywords, config, files, flags, player order, duration rules, the Python versions, `/tfm` skill coverage) must appear in README. Fix README until it reports none. If the check itself is wrong, fix `readme_check.py`; that's a watched file, so document that change too.
 - **Layer 2, unreviewed, lists code changed since the last `--confirm`.** A check can't read meaning, so this is how behaviour changes get caught. Read `--diff` and update README for anything a user would notice, then run `--confirm`. If a change has no user-visible effect, tell the user so and confirm.
 - **Never run `--confirm` just to clear the warning without reading `--diff`.** `--confirm` refuses while any drift remains, and every confirm is logged in `.readme_sync/confirm.log`.
 - **When you report back,** tell the user the README was updated and what the check printed.

@@ -4,7 +4,7 @@ throwaway data directory and check each exits 0 with sane output.
 
     python smoke_test.py
 
-Every run gets a fresh temporary AI_RADIO_HOME, so the real data directory (~/.claude/radio by
+Every run gets a fresh temporary TERMINAL_FM_HOME, so the real data directory (~/.claude/terminal-fm by
 default: state, config, key, queue, library) is never read or written, and nothing is played,
 generated or spent. Stdlib only. Exit status 0 when every check passes, 1 otherwise.
 """
@@ -24,7 +24,7 @@ FAILS = []
 
 def radio(home, *args):
     env = dict(os.environ)
-    env["AI_RADIO_HOME"] = str(home)
+    env["TERMINAL_FM_HOME"] = str(home)
     env.pop("STABILITY_API_KEY", None)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     p = subprocess.run([sys.executable, str(RADIO)] + list(args), env=env, cwd=str(home),
@@ -85,7 +85,7 @@ def main():
         for d in ("queue", "output"):
             if not (home / d).is_dir():
                 FAILS.append(f"{d}/ not created in the temp home")
-                print(f"FAIL AI_RADIO_HOME not honoured: {home / d} missing")
+                print(f"FAIL TERMINAL_FM_HOME not honoured: {home / d} missing")
 
         # 2. A populated library, history with non-ASCII text, and settings changes.
         out_dir = home / "output"

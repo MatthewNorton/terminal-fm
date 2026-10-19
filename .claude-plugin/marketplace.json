@@ -4,6 +4,6 @@
   "owner": { "name": "Matt Norton", "url": "https://github.com/MatthewNorton" },
   "description": "Matt Norton's Claude Code plugins.",
   "plugins": [
-    { "name": "terminal-fm", "source": "./", "description": "Continuous generated-music radio with a neural DJ for Claude Code. Needs Python 3.8+, mpv or FFmpeg (built in on macOS) and a Stability AI API key." }
+    { "name": "terminal-fm", "source": "./", "description": "Continuous generated-music radio with a neural DJ for Claude Code. Needs Python 3.11+, mpv or FFmpeg (built in on macOS) and a Stability AI API key." }
   ]
 }

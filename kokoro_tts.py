@@ -6,7 +6,7 @@ Kokoro-82M TTS wrapper for Terminal FM. Renders text -> WAV using kokoro-onnx
     echo "hello" | python kokoro_tts.py --out out.wav --voice am_michael
 
 Model files live in <data dir>/kokoro/ (kokoro-v1.0.fp16.onnx + voices-v1.0.bin), where the data
-dir is ~/.claude/radio or $AI_RADIO_HOME. Requires: pip install -U kokoro-onnx soundfile (the
+dir is ~/.claude/terminal-fm or $TERMINAL_FM_HOME. Requires: pip install -U kokoro-onnx soundfile (the
 current kokoro-v1.0.fp16.onnx download needs kokoro-onnx 0.6 or newer).
 """
 import argparse
@@ -14,8 +14,8 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(os.path.expanduser(os.environ.get("AI_RADIO_HOME", "").strip()
-                               or str(Path.home() / ".claude" / "radio")))
+ROOT = Path(os.path.expanduser(os.environ.get("TERMINAL_FM_HOME", "").strip()
+                               or str(Path.home() / ".claude" / "terminal-fm")))
 KDIR = ROOT / "kokoro"
 MODEL_CANDIDATES = ("kokoro-v1.0.fp16.onnx", "kokoro-v1.0.onnx", "kokoro-v1.0.int8.onnx")
 

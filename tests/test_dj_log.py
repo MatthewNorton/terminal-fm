@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import radio, reset_home  # noqa: F401  (sets AI_RADIO_HOME first)
+from radio_test_support import radio, reset_home  # noqa: F401  (sets TERMINAL_FM_HOME first)
 
 import dj  # noqa: E402
 

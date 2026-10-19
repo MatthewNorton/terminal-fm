@@ -1,8 +1,8 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "terminal-fm",
-  "version": "1.0.0",
-  "description": "A continuous music player and neural DJ for Claude Code: generates tracks with Stable Audio 3, narrates what Claude is working on between songs. Needs Python 3.8+, an audio player (mpv or FFmpeg; built in on macOS) and a Stability AI API key.",
+  "version": "1.1.0",
+  "description": "A continuous music player and neural DJ for Claude Code: generates tracks with Stable Audio 3, narrates what Claude is working on between songs. Needs Python 3.11+, an audio player (mpv or FFmpeg; built in on macOS) and a Stability AI API key.",
   "author": { "name": "Matt Norton", "url": "https://github.com/MatthewNorton" },
   "homepage": "https://github.com/MatthewNorton/terminal-fm",
   "repository": "https://github.com/MatthewNorton/terminal-fm",

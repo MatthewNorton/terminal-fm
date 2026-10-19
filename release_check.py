@@ -34,7 +34,7 @@ folder, else from this file's folder. A hit is reported by its line number in th
 by its text, and the summary line says how many markers were loaded.
 
 Exit status: 0 and `release_check: clean (N files, ...)` when nothing is flagged, 1 with one
-line per finding otherwise, 2 for a usage or git error. Standard library only, Python 3.8+.
+line per finding otherwise, 2 for a usage or git error. Standard library only.
 
 Pre-commit hook (`.git/hooks/pre-commit`):
     #!/bin/sh
