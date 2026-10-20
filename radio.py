@@ -773,18 +773,20 @@ def _print_key_help(lead):
 # The oldest Python that still gets security fixes: 3.10 reached end of life on 2026-10-01
 # (devguide.python.org/versions). hooks/radio-hook.sh refuses anything older; a test keeps them equal.
 PY_MIN = (3, 11)
-# The Python the install commands name: the newest that winget packages and that onnxruntime (which
-# the Kokoro voice needs) ships builds for. Both stopped at 3.14 on 2026-10-19.
+# The Python the install commands name: the newest that winget packages (3.14 on 2026-10-19).
 PY_INSTALL = "3.14"
 
 
-def _install_cmd(program="player"):
+def _install_cmd(program="player", version=PY_INSTALL):
     """(name, install command) for an audio player, or with "ffmpeg" FFmpeg itself, or with "python"
-    Python, on this OS."""
+    Python `version`, on this OS. Linux has one command only for the distro's own Python, so any
+    other version gets ""."""
     if program == "python":
         if IS_WIN:
-            return "Python", f"winget install Python.Python.{PY_INSTALL}"
-        return "Python", "brew install python" if sys.platform == "darwin" else "sudo apt install python3"
+            return "Python", f"winget install Python.Python.{version}"
+        if sys.platform == "darwin":
+            return "Python", "brew install python" if version == PY_INSTALL else f"brew install python@{version}"
+        return "Python", "sudo apt install python3" if version == PY_INSTALL else ""
     if IS_WIN:
         return "FFmpeg", "winget install Gyan.FFmpeg"
     if sys.platform == "darwin":
@@ -1938,19 +1940,35 @@ def _statusline_page(done):
         print('  Or ask Claude: "add the Terminal FM statusline to my settings".')
 
 
+# pip's arguments for the voice's packages. 0.6 is the kokoro-onnx the voice needs, so on a Python
+# no such release supports, pip refuses instead of quietly taking an older one; the double quotes
+# keep the > from being a redirect in bash, PowerShell and cmd. readme_check.py holds README to it.
+KOKORO_PIP_ARGS = 'install -U "kokoro-onnx>=0.6" soundfile'
+
+
 def _voice_page(done):
     import dj
-    pip = "pip install -U kokoro-onnx soundfile"
+    top = "%d.%d" % dj.PY_VOICE_MAX
+    if sys.version_info[:2] <= dj.PY_VOICE_MAX:          # pip runs in the very Python just checked
+        steps, pip = [], _cmdline([_console_python(), "-m", "pip"], call=True)
+        title = f"Install its Python packages in a terminal. They need Python {top} or older:"
+    else:                                                # a second Python, which dj.py finds by itself
+        get = _install_cmd("python", top)[1]
+        how = (", if you don't have it:" if get
+               else " with your system's package manager, if you don't have it.")
+        steps = [(f"Its Python packages need Python {top} or older, and this is Python"
+                  f" {sys.version.split()[0]}. Install Python {top}{how}", get)]
+        pip = (f"py -{top}" if IS_WIN else f"python{top}") + " -m pip"
+        title = "Install the packages with it:"
+    steps.append((title, f"{pip} {KOKORO_PIP_ARGS}"))
     print("DJ voice: Kokoro-82M, a natural voice for the DJ. Without it the DJ uses your system voice.")
     if done:
-        print(f"Status: model files found. If the DJ still sounds robotic, run this in a terminal:"
-              f"\n\n{STEP_INDENT}{pip}")
+        print(f"Status: model files found. If the DJ still sounds robotic:\n\n{_steps(steps)}")
         return
     print("Status: not installed.\n")
     print(_steps([(f"Download {dj.KOKORO_MODELS[0]} and {dj.KOKORO_VOICES} from:",
                    "https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1"),
-                  ("Put both files in this folder:", str(dj.KOKORO_DIR)),
-                  ("Install its Python packages in a terminal:", pip)], again="/tfm setup voice"))
+                  ("Put both files in this folder:", str(dj.KOKORO_DIR))] + steps, again="/tfm setup voice"))
     if sys.platform.startswith("linux") and not any(
             shutil.which(t) for t in ("piper", "espeak-ng", "espeak")):
         print("  No system voice was found either. For a basic one: sudo apt install espeak-ng")

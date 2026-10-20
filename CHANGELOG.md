@@ -4,6 +4,10 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 ## [Unreleased]
 
+### Fixed
+
+- The DJ voice's packages need Python 3.13 or older, which README and `setup voice` now say; on a newer Python, `setup voice` shows how to install a Python 3.13 beside it, and the voice finds that Python by itself. Every pip command they print pins `"kokoro-onnx>=0.6"`, so pip on Python 3.14 refuses instead of quietly installing a kokoro-onnx too old for the voice.
+
 ### Security
 
 - `radio key` keeps the key file owner-only (`0600` on POSIX) when the rename of its temp file is refused. That fallback used to rewrite the key through the general file writer, which creates files with the default permissions (readable by other users under a typical umask), and only restricted it afterwards.

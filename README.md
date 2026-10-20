@@ -27,6 +27,8 @@ Check each one in a terminal (PowerShell on Windows). If a check fails, run the 
 
 **Why 3.11:** it's the oldest Python that still gets security fixes. `setup` flags anything older.
 
+**Want the DJ voice?** The optional [DJ voice](#dj-voice) needs Python 3.13 or older, so install 3.13 rather than a newer Python.
+
 **Which player plays:** First found wins: `mpv` › `ffplay` › `afplay` (macOS) › `mpg123` › `cvlc`. Only `mpv`, `ffplay` and `cvlc` can resume a paused or interrupted track mid-song; the others restart it from the top.
 
 ### Steps
@@ -105,7 +107,8 @@ Everything works without these. Each extra has a setup page, `/tfm setup <name>`
 
 1. Download `kokoro-v1.0.fp16.onnx` and `voices-v1.0.bin` from <https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1>.
 2. Put both files in `~/.claude/terminal-fm/kokoro/`.
-3. In a terminal, run `pip install -U kokoro-onnx soundfile` (kokoro-onnx 0.6 or newer). It needs onnxruntime, which had no build for Python 3.15 in October 2026: on 3.15, install it into a Python 3.14 and set `dj.python` to that interpreter if the voice doesn't find it.
+3. On Python 3.13 or older, in a terminal: `pip install -U "kokoro-onnx>=0.6" soundfile`
+4. On a newer one, run `/tfm setup voice`. It prints the steps to install a Python 3.13 beside it on your system.
 
 The radio finds a Python that has these packages by itself. To pin one, set `dj.python` in `config.json`. On Linux without a system voice, `sudo apt install espeak-ng` gives a basic one.
 
@@ -442,7 +445,7 @@ Start with `/tfm setup`. If that doesn't explain it:
 | No audio player | Install one (see [Requirements](#requirements)). On Windows, `C:\ffmpeg\bin\` is checked even when it isn't on PATH. |
 | `setup` says the session hooks haven't run | Start a new Claude Code session. On Windows, install Git for Windows (`winget install Git.Git`) and restart. Claude Code looks for `bash.exe` beside `git`, or wherever `CLAUDE_CODE_GIT_BASH_PATH` points. |
 | No track in the statusline | Run `/tfm setup statusline`. The statusline refreshes each turn and every `statusLine.refreshInterval` seconds, so it can lag; `/tfm status` is always current. |
-| The DJ sounds robotic | That's Windows SAPI, used when Kokoro isn't installed or fails. The end of `dj_engine.log` says which: `kokoro not installed`, or a `kokoro-fail` line naming the Python and the error. Install `kokoro-onnx soundfile` into that Python, or point `dj.python` at one that has them. |
+| The DJ sounds robotic | That's Windows SAPI, used when Kokoro isn't installed or fails. The end of `dj_engine.log` says which: `kokoro not installed`, or a `kokoro-fail` line naming the Python and the error. Install the voice's packages as [DJ voice](#dj-voice) shows, or point `dj.python` at a Python that has them. |
 | `gen "<prompt>" 3` is refused | One number is a length, and 3 seconds isn't a track. For three tracks: `gen "<prompt>" 3 auto`. |
 | `gen` refuses a long prompt | Cut what the message says, or let `enhance` rewrite it. `estimated` in the message means the exact token count isn't installed (`/tfm setup tokens`). |
 | `gen` pauses before generating | With no length typed, the enhancer's model picks one, which took 9 to 14 seconds on a CPU in testing. Type a length to skip it. |
