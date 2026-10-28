@@ -4,6 +4,10 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 ## [Unreleased]
 
+### Changed
+
+- New tracks are named after up to 60 characters of their prompt, cut at a whole word with single dashes, instead of 30 characters cut mid-word (`a-driving--upbeat-lofi-synthwa`). Tracks made before keep their names.
+
 ### Fixed
 
 - The DJ voice's packages need Python 3.13 or older, which README and `setup voice` now say; on a newer Python, `setup voice` shows how to install a Python 3.13 beside it, and the voice finds that Python by itself. Every pip command they print pins `"kokoro-onnx>=0.6"`, so pip on Python 3.14 refuses instead of quietly installing a kokoro-onnx too old for the voice.

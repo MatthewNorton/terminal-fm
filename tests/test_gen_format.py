@@ -187,6 +187,37 @@ class GenGrammar(GenTestCase):
         self.assertEqual(self.lines(out)[0], "Length: keyword rules decided 240s")
 
 
+class TrackNames(unittest.TestCase):
+    """A new track's name starts with its prompt, cut at a whole word (_slug)."""
+
+    def test_words_joined_by_single_dashes(self):
+        for prompt, want in (("warm lo-fi hip hop, rhodes, vinyl crackle, 80 BPM",
+                              "warm-lo-fi-hip-hop-rhodes-vinyl-crackle-80-bpm"),
+                             ("Café au lait -- jazz!", "café-au-lait-jazz"),
+                             ("  ...!!! ", "track"), ("", "track")):
+            with self.subTest(prompt):
+                self.assertEqual(radio._slug(prompt), want)
+
+    def test_a_long_prompt_is_cut_at_a_whole_word(self):
+        # The old rule cut at 30 characters, mid-word: "a-driving--upbeat-lofi-synthwa".
+        prompt = ("TrackType: Music, Genre: smooth jazz, upright bass walking lines, brushed drums,"
+                  " soft rhodes chords, late night lounge, D minor, 84 BPM")
+        self.assertEqual(radio._slug(prompt), "tracktype-music-genre-smooth-jazz-upright-bass-walking-lines")
+
+    def test_one_word_over_the_limit_is_cut_inside_it(self):
+        self.assertEqual(radio._slug("x" * 100 + " jazz"), "x" * radio.NAME_CHARS)
+
+    def test_a_whole_name_fits_255_bytes_in_any_script(self):
+        # Linux and macOS limit a name to 255 bytes; these letters are 3 and 4 bytes in UTF-8.
+        stamp, clash = "-20261028-185928-1.mp3", "-20261028-185929"
+        for prompt in ("夜のジャズ " * 30, ("𝐚" * 10 + " ") * 10, "𝐚" * 100):
+            with self.subTest(prompt[:12]):
+                slug = radio._slug(prompt)
+                self.assertNotEqual(slug, "track")                # the letters were kept
+                self.assertLessEqual(len((slug + clash + stamp).encode("utf-8")), 255)
+                self.assertNotIn("�", slug)                  # never half a character
+
+
 class GenSaves(GenTestCase):
     def set_format(self, fmt):
         cfg = radio.load_config()

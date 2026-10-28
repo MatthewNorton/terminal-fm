@@ -1014,6 +1014,25 @@ def _wav_to_mp3(wav, mp3):
 NOTHING_SENT = "nothing sent"     # a source's credits value when it refused before any request
 
 
+# A new track's file name starts with its prompt, cut at a whole word: NAME_CHARS characters tell
+# tracks apart and give the skill words to match a genre against, and stay short in `list` and the
+# statusline. Windows' 260-character path is the tightest limit: a 52-character library path plus
+# \_archive\, the stamp and a clash suffix measured ~160 (2026-10-28). NAME_BYTES keeps a prompt in a
+# script with 4-byte letters under the 255-byte names of Linux and macOS.
+NAME_CHARS = 60
+NAME_BYTES = 180
+
+
+def _slug(prompt):
+    """The start of a track's file name: the prompt's words, lowercased and joined by single dashes,
+    cut at a whole word to NAME_CHARS characters and NAME_BYTES UTF-8 bytes; "track" if none."""
+    slug = "-".join("".join(c if c.isalnum() else " " for c in prompt.lower()).split())
+    cut = slug[:NAME_CHARS].encode("utf-8")[:NAME_BYTES].decode("utf-8", "ignore")
+    if cut != slug and slug[len(cut)] != "-" and "-" in cut:
+        cut = cut.rsplit("-", 1)[0]                   # cut inside a word: back to the last whole one
+    return cut or "track"
+
+
 def source_stability_api(prompt, count, duration):
     """Stable Audio 3 (async): submit -> poll results -> save mp3 / wav to the library.
     Returns (tracks_saved, credits_spent_or_None), or (0, NOTHING_SENT) when it refused before
@@ -1028,7 +1047,7 @@ def source_stability_api(prompt, count, duration):
     if not key:
         _print_key_help("No API key yet. To add one:")
         return 0, NOTHING_SENT
-    slug = "".join(c if c.isalnum() else "-" for c in prompt.lower()).strip("-")[:30] or "track"
+    slug = _slug(prompt)
     both = sc["output_format"] == BOTH_FORMATS
     api_fmt = "wav" if both else sc["output_format"]
     before = _balance(key)
