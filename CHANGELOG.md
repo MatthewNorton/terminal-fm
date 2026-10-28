@@ -4,8 +4,20 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 ## [Unreleased]
 
+### Added
+
+- `/tfm setup <extra>` can install the extra for you. Claude shows what it would download, the disk space it needs and what it costs in Claude tokens, and asks first. `setup <extra> install` downloads each file from its publisher at a tested version, checks it against the publisher's SHA-256, runs a test, continues a stopped download when run again, and exits with 1 when it didn't install. The statusline's line is added by Claude, and Claude Code asks before `settings.json` changes.
+- The DJ voice's automatic install gives it its own Python environment, `~/.claude/terminal-fm/kokoro/venv`, and installs Python 3.13 first when no Python from 3.10 to 3.13 is found (winget on Windows, Homebrew on macOS).
+
+### Changed
+
+- `setup tokens` is now `setup tokenizer`. The old name still works.
+- `setup` counts the DJ voice as installed only when a Python with kokoro-onnx 0.6 or newer can run it, not when the model files are there: kokoro-onnx 0.5.0 can't run the current model.
+- The DJ looks for the voice's packages in the voice's own environment first.
+
 ### Fixed
 
+- The prompt enhancer's steps pointed at llama.cpp's newest release, v0.7.0, which holds no programs. They now name the tested build, b11669, and the archive for your system.
 - The DJ voice's packages need Python 3.13 or older, which README and `setup voice` now say; on a newer Python, `setup voice` shows how to install a Python 3.13 beside it, and the voice finds that Python by itself. Every pip command they print pins `"kokoro-onnx>=0.6"`, so pip on Python 3.14 refuses instead of quietly installing a kokoro-onnx too old for the voice.
 
 ### Security

@@ -28,6 +28,7 @@ ROOT = Path(os.path.expanduser(os.environ.get("TERMINAL_FM_HOME", "").strip()
                                or str(Path.home() / ".claude" / "terminal-fm")))
 CONFIG_FILE = ROOT / "config.json"
 KOKORO_DIR = ROOT / "kokoro"                              # kokoro-v1.0.*.onnx + voices-v1.0.bin
+KOKORO_VENV = KOKORO_DIR / "venv"                         # the voice's own Python (radio setup voice install)
 TMP_WAV = ROOT / "_dj.wav"                                # shared scratch (Piper only)
 ENGINE_LOG = ROOT / "dj_engine.log"                       # one line per utterance: engine + why
 KOKORO_PY_CACHE = ROOT / ".kokoro_python"                 # cached interpreter that has kokoro_onnx
@@ -107,26 +108,40 @@ def _has_kokoro(py):
         return False
 
 
-def _kokoro_python(cfg):
+def venv_python():
+    """The Python inside KOKORO_VENV."""
+    return KOKORO_VENV / ("Scripts/python.exe" if IS_WIN else "bin/python")
+
+
+def pinned_python(cfg):
+    """`dj.python` from config.json when that file exists: the DJ then renders with it, always."""
+    p = cfg.get("python")
+    return str(p) if p and Path(str(p)).exists() else None
+
+
+def _kokoro_python(cfg, check=False):
     """Find a Python that has kokoro_onnx; cache it.
 
     The daemon/hook may be launched by an interpreter that lacks kokoro_onnx, which silently
     dropped the DJ to the robotic SAPI voice. Instead of trusting whoever launched us, locate
-    ANY interpreter that can actually run Kokoro (current one, its python.exe sibling, then PATH,
-    then Pythons installed beside those) and reuse it. The cache is validated by existence only
-    (fast) and self-heals: a failed render clears it so the next call re-probes.
+    ANY interpreter that can actually run Kokoro (the voice's own environment, the current one, its
+    python.exe sibling, then PATH, then Pythons installed beside those) and reuse it. The cache is
+    validated by existence only (fast) and self-heals: a failed render clears it so the next call
+    re-probes. `check` (radio setup) tests the configured and cached interpreters too, and caches
+    nothing: the answer is the interpreter the DJ would end up rendering with.
     """
-    cfgpy = cfg.get("python")                          # 1) explicit override: dj.python in config
-    if cfgpy and Path(str(cfgpy)).exists():
-        return str(cfgpy)
+    cfgpy = pinned_python(cfg)                         # 1) explicit override: dj.python in config
+    if cfgpy:
+        return cfgpy if not check or _has_kokoro(cfgpy) else None
     try:                                               # 2) previously-confirmed interpreter
         if KOKORO_PY_CACHE.exists():
             cached = KOKORO_PY_CACHE.read_text(encoding="utf-8").strip()
-            if cached and Path(cached).exists():
+            if cached and Path(cached).exists() and (not check or _has_kokoro(cached)):
                 return cached
     except Exception:
         pass
-    cands = []                                         # 3) probe: us, our python.exe sibling, PATH
+    venv = venv_python()                               # 3) probe: our venv, us, python.exe sibling, PATH
+    cands = [str(venv)] if venv.exists() else []
     exe = sys.executable or ""
     if exe:
         cands.append(exe)
@@ -144,7 +159,8 @@ def _kokoro_python(cfg):
         seen.add(cl)
         if _has_kokoro(c):
             try:
-                KOKORO_PY_CACHE.write_text(c, encoding="utf-8")
+                if not check:
+                    KOKORO_PY_CACHE.write_text(c, encoding="utf-8")
             except Exception:
                 pass
             return c
@@ -169,6 +185,13 @@ def _cleanup_tmp():
 # or "fail" (installed, but no interpreter could run it or the render errored). The fallback
 # engines' log lines read it, so a zero-model install isn't logged as a failed render.
 _kokoro_last = ""
+_kokoro_error = ""          # that render's log detail, which `radio setup voice install` reports
+
+
+def _kokoro_log(engine, detail, text):
+    global _kokoro_error
+    _kokoro_error = detail
+    _log_engine(engine, detail, text)
 
 
 KOKORO_MODELS = ("kokoro-v1.0.fp16.onnx", "kokoro-v1.0.onnx", "kokoro-v1.0.int8.onnx")
@@ -215,12 +238,12 @@ def _kokoro_render(text):
     script = CODE_DIR / "kokoro_tts.py"
     if not (kokoro_files_present() and script.exists()):
         _kokoro_last = "skip"
-        _log_engine("kokoro-skip", "model/voices/script missing", text)
+        _kokoro_log("kokoro-skip", "model/voices/script missing", text)
         return None
     cfg = dj_config()
     py = _kokoro_python(cfg)
     if not py:
-        _log_engine("kokoro-fail", "no interpreter has kokoro_onnx installed", text)
+        _kokoro_log("kokoro-fail", "no interpreter has kokoro_onnx installed", text)
         return None
     _cleanup_tmp()
     voice = cfg.get("kokoro_voice", DJ_DEFAULTS["kokoro_voice"])
@@ -235,9 +258,9 @@ def _kokoro_render(text):
         # The last line is the exception; onnxruntime's warnings come first, in UTF-16 on Windows.
         lines = [l.strip() for l in (r.stderr or b"").decode("utf-8", "replace").replace("\0", "").splitlines()]
         err = ([l for l in lines if l] or [""])[-1][:160]
-        _log_engine("kokoro-fail", f"rc={r.returncode} ({py}) {err}", text)
+        _kokoro_log("kokoro-fail", f"rc={r.returncode} ({py}) {err}", text)
     except Exception as e:
-        _log_engine("kokoro-fail", f"exception ({py}) {e}", text)
+        _kokoro_log("kokoro-fail", f"exception ({py}) {e}", text)
     try:                                               # self-heal: drop a bad cached interpreter
         if KOKORO_PY_CACHE.exists() and not cfg.get("python"):
             KOKORO_PY_CACHE.unlink()

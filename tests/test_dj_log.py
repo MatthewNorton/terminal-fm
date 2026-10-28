@@ -133,6 +133,24 @@ class SideBySidePython(unittest.TestCase):
             self.assertEqual(dj._kokoro_python({}), "/usr/bin/python3.12")
         self.assertEqual([n for n in self.asked if n.startswith("python3.")], ["python3.13", "python3.12"])
 
+    def test_the_voices_own_environment_is_tried_first(self):
+        venv = dj.venv_python()                       # what `radio setup voice install` makes
+        venv.parent.mkdir(parents=True)
+        venv.write_bytes(b"")
+        self.kokoro = {str(venv), self.PYTHON}
+        self.assertEqual(dj._kokoro_python({}), str(venv))
+        self.assertEqual(self.calls[0][0], str(venv))
+
+    def test_a_check_tests_the_cache_and_keeps_nothing(self):
+        cached = dj.ROOT / "cached-python.exe"        # any existing file stands for an interpreter
+        cached.write_bytes(b"")
+        dj.KOKORO_PY_CACHE.write_text(str(cached), encoding="utf-8")
+        self.kokoro = {self.PYTHON}                   # the cached one has lost its packages
+        self.assertEqual(dj._kokoro_python({}), str(cached))               # the DJ trusts its cache
+        self.assertEqual(dj._kokoro_python({}, check=True), self.PYTHON)   # `setup` tests it, then searches
+        self.assertEqual(dj.KOKORO_PY_CACHE.read_text(encoding="utf-8"), str(cached))   # and caches nothing
+        self.assertIsNone(dj._kokoro_python({"python": str(cached)}, check=True))       # dj.python is final
+
 
 if __name__ == "__main__":
     unittest.main()

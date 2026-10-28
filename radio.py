@@ -27,7 +27,10 @@ Architecture
 """
 
 import csv
+import functools
+import hashlib
 import heapq
+import http.client
 import io
 import json
 import os
@@ -40,9 +43,11 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path
+from collections import namedtuple
+from pathlib import Path, PurePosixPath
 
 # --------------------------------------------------------------------------- paths
 # Two roots. CODE_DIR is wherever this file lives (a clone, a plugin install, ~/.claude/terminal-fm) and
@@ -836,12 +841,14 @@ def _ssl_context():
     overrides it with a PEM, for machines whose root store can't build a path to
     the API's chain.
     """
+    return ssl.create_default_context(cafile=_ca_bundle() or None)
+
+
+def _ca_bundle():
+    """The PEM file `stability_api.ca_bundle` names, expanded, when it exists; else ""."""
     ca = (CONFIG.get("stability_api") or {}).get("ca_bundle") or ""
-    if ca:
-        ca = os.path.expandvars(os.path.expanduser(ca))
-        if Path(ca).exists():
-            return ssl.create_default_context(cafile=ca)
-    return ssl.create_default_context()
+    ca = os.path.expandvars(os.path.expanduser(ca)) if ca else ""
+    return ca if ca and Path(ca).exists() else ""
 
 
 def _http_post(url, key, fields, timeout=60):
@@ -1914,6 +1921,256 @@ def _setup_required():
     return rows
 
 
+# --------------------------------------------------------------------------- setup: the optional extras
+# What `setup <extra> install` downloads. Each is pinned to the file tested here, with the size and
+# SHA-256 its publisher lists (GitHub's asset digest, Hugging Face's LFS hash), checked 2026-10-21; a
+# download that doesn't match is deleted, never used. A new pin needs the same tests again: the voice
+# rendering through kokoro_tts.py, llama-cli's answers passing _strip_cli_chrome, and the tokenizer
+# loading in prompt_tokens.
+KOKORO_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/"
+KOKORO_PINS = {"kokoro-v1.0.fp16.onnx": (163_527_961, "f3a290d384fbb27966d462905c71a46cef9e5fd00516b40df32a0b4afe77ac96"),
+               "voices-v1.0.bin": (28_214_398, "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d")}
+# llama.cpp's CPU builds, by system and processor. b11669 is the build its v0.7.0 release points at.
+LLAMA_RELEASES = "https://github.com/ggml-org/llama.cpp/releases"
+LLAMA_BUILD = "b11669"
+LLAMA_ASSETS = {
+    ("win32", "x64"): ("win-cpu-x64.zip", 19_537_886, "37b3efcf962847ca869745fd4ccf7f5e7e8dacfeff9fa3523b4ca8cdc66d632b"),
+    ("win32", "arm64"): ("win-cpu-arm64.zip", 12_442_177, "9cff39ffed17edcd03a7d876073f74d7b48cd43a1e5eafdd59ee094185ad871b"),
+    ("darwin", "arm64"): ("macos-arm64.tar.gz", 12_191_582, "dbed55493d72bc1ba2babc8770d669c2289b5bc4ee9fb2a4dfc158d45b7d13fd"),
+    ("darwin", "x64"): ("macos-x64.tar.gz", 11_677_404, "cab28238d78158109b48deb27b05d50e0dcef56275d2e76da9ca8281526c7532"),
+    ("linux", "x64"): ("ubuntu-x64.tar.gz", 17_851_611, "cf07c1c112d709bd67e522017471de57ed0ec8bea031d732c5422351c07f65ac"),
+    ("linux", "arm64"): ("ubuntu-arm64.tar.gz", 13_900_160, "9ac6fda2058d35677608a06f751a50122ddfa4ce0ddb7f084466b8e79b6d4a99"),
+}
+_MACHINES = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "aarch64": "arm64"}   # platform.machine()
+QWEN_PAGE = "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF"
+QWEN_URL = QWEN_PAGE + "/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+QWEN_PIN = (2_497_281_120, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597")
+TOKENIZER_PAGE = "https://huggingface.co/google/t5gemma-b-b-ul2"
+TOKENIZER_URL = TOKENIZER_PAGE + "/resolve/97ea9b7e92738bb57437867277ae38e65345b8d7/tokenizer.json"
+TOKENIZER_PIN = (34_362_429, "7794135caa3ea73918949c902a781cc61dab674a4b59c17d85931c77c1114cbd")
+# The voice's own environment on disk, with kokoro-onnx 0.6.1 and its packages: 158 MB measured on
+# Windows (2026-10-21), plus what pip downloads for it, 39 MB of wheels there.
+VOICE_ENV_BYTES = 200_000_000
+BREW_BINS = "/opt/homebrew/bin:/usr/local/bin"    # Homebrew's programs on Apple silicon, then on Intel
+# Claude's part of an install once the user says yes: (API calls, new tokens, how it was found). Measured
+# on SETUP_COST_DATE with `claude -p` and Claude Opus 5.5, `/tfm setup <extra>` and then "Install it" in
+# a new session, from the usage Claude Code reported: voice 1,419 new tokens, enhancer 2,513 (run in the
+# background, so it reads its output when done), tokenizer 1,308. The voice's ran in the foreground with a
+# Python already there; the skill runs one that installs Python first in the background (not measured).
+# New tokens are the install's output and Claude's replies; every call also re-reads the conversation so
+# far, 45k tokens in that new session. The statusline couldn't be measured without editing the real
+# settings.json: its 3 calls are a Read, an Edit and the reply, and its tokens are estimated at the
+# measured ~0.65k a call plus a settings.json's text.
+SETUP_COST = {"statusline": (3, 3000, "estimated"), "voice": (2, 1400, "measured"),
+              "enhancer": (4, 2500, "measured"), "tokenizer": (2, 1300, "measured")}
+SETUP_COST_DATE = "2026-10-21"
+
+
+def _size(n):
+    """Bytes as the pages say them: 164 MB, 2.5 GB."""
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{max(1, round(n / 1e6))} MB"
+
+
+def _last_line(text):
+    """The last non-empty line of a helper program's output, for a message (NULs dropped: some
+    Windows tools write UTF-16)."""
+    lines = [ln.strip() for ln in (text or "").replace("\0", "").splitlines() if ln.strip()]
+    return lines[-1][:200] if lines else "no output"
+
+
+def _sha256(path):
+    with open(path, "rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+class _LoginStaysOnHost(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect with the login (an unredirected Authorization header) only when it stays
+    on the same scheme, host and port: a hop within huggingface.co still needs it, its CDN never
+    gets it. urllib on its own drops it on every redirect."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        auth = req.unredirected_hdrs.get("Authorization")
+        old, nxt = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new is not None and auth and (old.scheme, old.hostname, old.port) == (nxt.scheme, nxt.hostname, nxt.port):
+            new.add_unredirected_header("Authorization", auth)
+        return new
+
+
+def _fetch(url, dest, size, sha256, token=None, refused=""):
+    """Download `url` to `dest` and check it against its published size and SHA-256. Returns None,
+    or what went wrong. The bytes go to <dest>.part first, so a download that stops (a dropped
+    connection, a killed command) continues from there the next time, with an HTTP Range request; a
+    file that fails the check is deleted. `token` goes to `url`'s own host only, never to a host it
+    redirects to: GitHub and Hugging Face both hand the file over from a CDN, which needs no login.
+    `refused` follows the message for a 401 or 403."""
+    if dest.is_file() and dest.stat().st_size == size and _sha256(dest) == sha256:
+        return None
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    have = part.stat().st_size if part.is_file() else 0
+    host = urllib.parse.urlsplit(url).hostname
+    if have < size:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        if have:
+            req.add_header("Range", f"bytes={have}-")
+        if token:
+            req.add_unredirected_header("Authorization", f"Bearer {token}")
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _LoginStaysOnHost)
+        try:
+            with opener.open(req, timeout=60) as r, \
+                    open(part, "ab" if have and r.status == 206 else "wb") as f:   # 200: from the top
+                shutil.copyfileobj(r, f, 1 << 20)
+        except urllib.error.HTTPError as e:
+            if e.code == 416:                         # the .part doesn't fit the file: start over
+                _unlink_quiet(part)
+            msg = f"{host} answered HTTP {e.code}"
+            return f"{msg}. {refused}" if refused and e.code in (401, 403) else msg
+        except Exception as e:
+            why = f"{type(e).__name__}: {e}"
+            if isinstance(getattr(e, "reason", e), ssl.SSLCertVerificationError):   # rerunning won't help
+                bundle = _ca_bundle()
+                return f"{host}'s certificate didn't verify ({why})" + (
+                    f", checked against stability_api.ca_bundle ({bundle})" if bundle else "")
+            if isinstance(e, (urllib.error.URLError, http.client.HTTPException, ConnectionError,
+                              TimeoutError, ssl.SSLError)):         # DNS, a dropped connection
+                return f"the download stopped ({why}). Run the same command again to continue it"
+            return f"the download failed ({why})"     # a locked .part, a full disk: said as it is
+    got = part.stat().st_size
+    if got < size:
+        return f"the download stopped at {_size(got)} of {_size(size)}. Run the same command again to continue it"
+    if got > size or _sha256(part) != sha256:
+        _unlink_quiet(part)
+        return f"{dest.name} didn't match its published SHA-256, so it was deleted"
+    os.replace(part, dest)
+    return None
+
+
+def _member_parts(name):
+    """An archive member's path as parts (() for the archive's own "./"), or None when it is
+    absolute, names a drive or climbs out with ..; a drive in any part counts, since on Windows
+    joining "top/C:x" lands outside the folder."""
+    p = PurePosixPath(name.replace("\\", "/"))
+    if p.is_absolute() or any(part == ".." or ":" in part for part in p.parts):
+        return None
+    return p.parts
+
+
+def _unpack(archive, dest):
+    """Unpack a llama.cpp release into `dest`: a .zip as it is, a .tar.gz without its one top folder.
+    Plain files only, and links to a file beside them; any other member, or a path that is absolute,
+    names a drive or climbs out with .., refuses the whole archive. Returns None, or why it refused."""
+    import tarfile
+    import zipfile
+    refused = f"{archive.name} holds something other than plain files, so it wasn't unpacked"
+    if archive.name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as z:
+            files = [(m, _member_parts(m.filename)) for m in z.infolist() if not m.is_dir()]
+            if any(not parts for _, parts in files):
+                return refused
+            for m, parts in files:
+                out = dest.joinpath(*parts)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(m) as src, open(out, "wb") as f:
+                    shutil.copyfileobj(src, f)
+        return None
+    with tarfile.open(archive, "r:gz") as t:
+        members, tops, plan = t.getmembers(), set(), []
+        for m in members:
+            parts = _member_parts(m.name)
+            if parts == () and m.isdir():             # "./", the archive itself
+                continue
+            if not parts:
+                return refused
+            tops.add(parts[0])
+            if len(parts) == 1 and m.isdir():         # the top folder itself
+                continue
+            link_ok = (m.issym() and m.linkname not in ("", ".", "..")
+                       and m.linkname == PurePosixPath(m.linkname).name)
+            if len(parts) == 1 or not (m.isfile() or link_ok):
+                return refused
+            plan.append((m, parts[1:]))
+        if len(tops) != 1:
+            return refused
+        for m, rel in plan:
+            out = dest.joinpath(*rel)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if m.issym():
+                os.symlink(m.linkname, out)
+                continue
+            with t.extractfile(m) as src, open(out, "wb") as f:
+                shutil.copyfileobj(src, f)
+            os.chmod(out, 0o755 if m.mode & 0o111 else 0o644)
+    return None
+
+
+def _run(cmd, timeout):
+    """(exit code, stdout + stderr) of a helper program, or (None, why it didn't start)."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, creationflags=CREATE_NO_WINDOW)
+        return r.returncode, r.stdout + r.stderr
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _no_room(need):
+    """Why `need` more bytes won't fit on the data folder's disk, or None."""
+    free = shutil.disk_usage(ROOT).free
+    return None if free >= need else (f"it needs about {_size(need)} free on the disk with {ROOT},"
+                                      f" which has {_size(free)}")
+
+
+def _claude_part(name):
+    calls, new, how = SETUP_COST[name]
+    return (f"  Claude's part: {calls} more calls and about {new / 1000:g}k new tokens, each call also"
+            f" re-reading the conversation so far ({how} {SETUP_COST_DATE}).")
+
+
+def _auto_block(name, todo):
+    """A page's automatic install: what `setup <name> install` would do here, the disk it needs and
+    Claude's measured share, which the skill asks the user about before running it."""
+    steps, why = todo
+    if steps is None:
+        print(f"\nAutomatic install: {why}")
+        return
+    print(f"\nAutomatic install (/tfm setup {name} install), about"
+          f" {_size(sum(b for _, b, _ in steps))} on disk:")
+    for what, _, _ in steps:
+        print(f"  - {what}")
+    print(_claude_part(name))
+
+
+def _install(extra):
+    """`setup <name> install`: the steps the page listed, in order, each line finished as it goes,
+    stopping at the first that fails. Run again, it skips what is done and resumes a download.
+    Returns the exit code: 1 when it printed `Not installed:`."""
+    if extra.installed():
+        print(f"Already installed. /tfm setup {extra.name} says more.")
+        return 0
+    steps, why = extra.plan()
+    if steps is None:
+        print(f"Not installed: {why}")
+        return 1
+    room = _no_room(sum(b for _, b, _ in steps))
+    if room:
+        print(f"Not installed: {room}.")
+        return 1
+    for what, _, action in steps:
+        print(f"  {what} ...", end="", flush=True)
+        start = time.time()
+        try:
+            err = action()
+        except Exception as e:                        # a locked file, a full disk: said, not a traceback
+            err = f"{type(e).__name__}: {e}"
+        print(f" {'failed' if err else 'done'} ({time.time() - start:.0f} s)")
+        if err:
+            print(f"Not installed: {err}.")
+            return 1
+    print(f"Installed: {extra.done}")
+    return 0
+
+
 def _statusline_page(done):
     print("Statusline: the playing track under Claude Code's prompt")
     if done:
@@ -1935,18 +2192,156 @@ def _statusline_page(done):
                       entry[1:-1])]
         else:
             steps = [("Create this file:", str(settings)), ("Put this in it:", entry)]
-        print("Status: not set up.\n")
+        print("Status: not set up.")
+        print(f"\nAutomatic install: Claude adds the line below to {settings.name} for you, and"
+              f" Claude Code asks you before that file changes.\n{_claude_part('statusline')}")
+        print("\nOr by hand:")
         print(_steps(steps + ["Save it. If the line doesn't show at your next prompt, restart Claude Code."]))
-        print('  Or ask Claude: "add the Terminal FM statusline to my settings".')
 
 
 # pip's arguments for the voice's packages. 0.6 is the kokoro-onnx the voice needs, so on a Python
 # no such release supports, pip refuses instead of quietly taking an older one; the double quotes
-# keep the > from being a redirect in bash, PowerShell and cmd. readme_check.py holds README to it.
+# keep the > from being a redirect in bash, PowerShell and cmd. readme_check.py holds README to it,
+# and the automatic install splits it with shlex.
 KOKORO_PIP_ARGS = 'install -U "kokoro-onnx>=0.6" soundfile'
+# kokoro-onnx 0.5.0 can't run the pinned model: onnxruntime refuses its int32 input where the model
+# wants float (measured 2026-10-21). 0.6.1 runs both the pinned model and model-files-v1.0's.
+KOKORO_ONNX_NEED = "kokoro-onnx %s or newer" % re.search(r"kokoro-onnx>=([\d.]+)", KOKORO_PIP_ARGS)[1]
+KOKORO_ONNX_MIN = tuple(int(n) for n in KOKORO_ONNX_NEED.split()[1].split("."))
 
 
-def _voice_page(done):
+@functools.cache
+def _voice_ready():
+    """The Python the DJ would render the voice with (dj.py's own search, caching nothing), when it
+    has kokoro-onnx KOKORO_ONNX_MIN or newer; else None. Asked once per command: the extras list,
+    the voice page and the install's plan all need it, and it starts a Python or more each time."""
+    import dj
+    py = dj._kokoro_python(dj.dj_config(), check=True)
+    if not py:
+        return None
+    code, out = _run([py, "-c", "import importlib.metadata as m; print(m.version('kokoro-onnx'))"], 30)
+    version = tuple(int(n) for n in re.findall(r"\d+", out)[:len(KOKORO_ONNX_MIN)]) if code == 0 else ()
+    return py if version >= KOKORO_ONNX_MIN else None
+
+
+def _voice_python():
+    """A Python the voice's packages install on, to make its environment from: this one when its
+    version fits, else one beside it (dj._side_by_side, and on Windows where winget puts one, which
+    no py launcher may know about yet in this session), or None."""
+    import dj
+    if dj.PY_VOICE_MIN <= sys.version_info[:2] <= dj.PY_VOICE_MAX:
+        return _console_python()
+    found = next(dj._side_by_side(), None)
+    if found:
+        return found
+    if IS_WIN:
+        major, minor = dj.PY_VOICE_MAX
+        p = os.path.expandvars(rf"%LOCALAPPDATA%\Programs\Python\Python{major}{minor}\python.exe")
+        return p if os.path.isfile(p) else None
+    if sys.platform == "darwin":
+        return shutil.which("python%d.%d" % dj.PY_VOICE_MAX, path=BREW_BINS)
+    return None
+
+
+def _get_python():
+    """Install the newest Python the voice supports for this user, with the command _install_cmd
+    names: winget's made silent and per-user, Homebrew's as it is. None when that Python is there
+    afterwards, else why not."""
+    import dj
+    ver = "%d.%d" % dj.PY_VOICE_MAX
+    cmd = _install_cmd("python", ver)[1].split()
+    if IS_WIN:      # winget's folder is on PATH in a user's terminal, but not always in Claude Code's
+        cmd[0] = shutil.which("winget") or os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe")
+        cmd += ["-e", "--scope", "user", "--silent", "--accept-package-agreements",
+                "--accept-source-agreements", "--disable-interactivity"]
+    else:
+        cmd[0] = shutil.which("brew") or shutil.which("brew", path=BREW_BINS)
+        if not cmd[0]:
+            return f"Homebrew isn't installed: install Python {ver} yourself, then run this again"
+    _, out = _run(cmd, 900)
+    if _voice_python():
+        return None
+    return f"{Path(cmd[0]).name} didn't install Python {ver} ({_last_line(out)})"
+
+
+def _make_venv():
+    import dj
+    base = _voice_python()
+    if not base:
+        return "no Python from %d.%d to %d.%d was found" % (*dj.PY_VOICE_MIN, *dj.PY_VOICE_MAX)
+    code, out = _run([base, "-m", "venv", "--clear", str(dj.KOKORO_VENV)], 300)
+    if code == 0 and dj.venv_python().is_file():
+        return None
+    if "ensurepip" in out:                            # Debian and Ubuntu leave venv out of python3
+        return "this Python can't make environments. On Debian or Ubuntu: sudo apt install python3-venv"
+    return f"python -m venv failed ({_last_line(out)})"
+
+
+def _pip_voice():
+    import dj
+    import shlex
+    py = str(dj.venv_python())
+    code, out = _run([py, "-m", "pip", "--disable-pip-version-check", "-q"] + shlex.split(KOKORO_PIP_ARGS), 900)
+    if code != 0:
+        return f"pip failed ({_last_line(out)})"
+    _atomic_write(dj.KOKORO_PY_CACHE, py)             # the DJ's interpreter from now on
+    return None
+
+
+def _voice_check(ready=None):
+    """Render a line on the DJ's own path (dj._kokoro_render: its Python, its configured voice),
+    without playing it. None when it made speech. `ready` is the Python the plan found with the
+    packages, when it skipped pip: it becomes the DJ's cached one first, since the render trusts a
+    cached Python that merely exists, and a stale one would fail the line."""
+    import dj
+    import wave
+    if ready:
+        _atomic_write(dj.KOKORO_PY_CACHE, ready)
+    wav = dj._kokoro_render("Terminal FM voice check.")
+    if not wav:
+        return f"the test line failed: {dj._kokoro_error}"
+    try:
+        with wave.open(str(wav), "rb") as w:
+            return None if w.getnframes() else "the test line came out empty"
+    finally:
+        _unlink_quiet(wav)
+
+
+def _voice_todo():
+    """The steps of `setup voice install` here, as (what, bytes on disk, action returning None or
+    why it failed), and None; or None and why it can't run."""
+    import dj
+    steps, ready = [], _voice_ready()
+    if not ready:
+        pinned = dj.pinned_python(dj.dj_config())
+        if pinned:
+            return None, (f"dj.python in config.json names {pinned}, which the DJ always uses, and it has no"
+                          f" {KOKORO_ONNX_NEED}. Install {KOKORO_ONNX_NEED} and soundfile in that Python, or"
+                          " remove dj.python, then run /tfm setup voice again.")
+        base, ver = _voice_python(), "%d.%d" % dj.PY_VOICE_MAX
+        if not base:
+            get = _install_cmd("python", ver)[1] if IS_WIN or sys.platform == "darwin" else ""
+            if not get:
+                return None, ("not possible here: the voice needs Python %d.%d to %s, and none was found."
+                              " Install one with your package manager, then run /tfm setup voice again."
+                              % (*dj.PY_VOICE_MIN, ver))
+            steps.append((f"Python {ver} for your user ({get})", 0, _get_python))
+            base = f"Python {ver}"
+        steps += [(f"a private Python environment in {dj.KOKORO_VENV}, made with {base}", 0, _make_venv),
+                  ("kokoro-onnx and soundfile from PyPI, into that environment", VOICE_ENV_BYTES, _pip_voice)]
+    have = {n for n in KOKORO_PINS if (dj.KOKORO_DIR / n).exists()}
+    if any((dj.KOKORO_DIR / m).exists() for m in dj.KOKORO_MODELS):
+        have.add(dj.KOKORO_MODELS[0])                 # any of the three models will do
+    for name, (size, sha) in KOKORO_PINS.items():
+        if name not in have:
+            steps.append((f"{name} ({_size(size)}) from github.com", size,
+                          functools.partial(_fetch, KOKORO_URL + name, dj.KOKORO_DIR / name, size, sha)))
+    steps.append(("a test line, rendered but not played", 0, functools.partial(_voice_check, ready)))
+    return steps, None
+
+
+def _voice_pip_steps():
+    """The steps by hand that give a Python the voice's packages."""
     import dj
     top = "%d.%d" % dj.PY_VOICE_MAX
     if sys.version_info[:2] <= dj.PY_VOICE_MAX:          # pip runs in the very Python just checked
@@ -1960,18 +2355,91 @@ def _voice_page(done):
                   f" {sys.version.split()[0]}. Install Python {top}{how}", get)]
         pip = (f"py -{top}" if IS_WIN else f"python{top}") + " -m pip"
         title = "Install the packages with it:"
-    steps.append((title, f"{pip} {KOKORO_PIP_ARGS}"))
+    return steps + [(title, f"{pip} {KOKORO_PIP_ARGS}")]
+
+
+def _voice_page(done):
+    import dj
     print("DJ voice: Kokoro-82M, a natural voice for the DJ. Without it the DJ uses your system voice.")
     if done:
-        print(f"Status: model files found. If the DJ still sounds robotic:\n\n{_steps(steps)}")
+        print("Status: installed.")
         return
-    print("Status: not installed.\n")
-    print(_steps([(f"Download {dj.KOKORO_MODELS[0]} and {dj.KOKORO_VOICES} from:",
-                   "https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.1"),
-                  ("Put both files in this folder:", str(dj.KOKORO_DIR))] + steps, again="/tfm setup voice"))
+    files = dj.kokoro_files_present()
+    print(f"Status: the model files are here, but no Python has {KOKORO_ONNX_NEED} and soundfile."
+          if files else "Status: not installed.")
+    _auto_block("voice", _voice_todo())
+    steps = [] if files else [(f"Download {dj.KOKORO_MODELS[0]} and {dj.KOKORO_VOICES} from:",
+                               KOKORO_URL.replace("/download/", "/tag/").rstrip("/")),
+                              ("Put both files in this folder:", str(dj.KOKORO_DIR))]
+    pip = [] if _voice_ready() else _voice_pip_steps()
+    print("\nOr by hand:\n" + _steps(steps + pip, again="/tfm setup voice"))
     if sys.platform.startswith("linux") and not any(
             shutil.which(t) for t in ("piper", "espeak-ng", "espeak")):
         print("  No system voice was found either. For a basic one: sudo apt install espeak-ng")
+
+
+def _llama_asset():
+    """(file name, bytes, SHA-256) of the llama.cpp build for this system and processor, or None."""
+    import platform
+    osname = "linux" if sys.platform.startswith("linux") else sys.platform
+    pin = LLAMA_ASSETS.get((osname, _MACHINES.get(platform.machine().lower())))
+    return (f"llama-{LLAMA_BUILD}-bin-{pin[0]}",) + pin[1:] if pin else None
+
+
+def _get_llama(name, size, sha256):
+    """Download llama.cpp, unpack it beside llm/bin, check that llama-cli runs, then move it in,
+    llama-cli last, so a stop halfway never leaves a llama-cli without its libraries."""
+    import tempfile
+    archive = LLM_DIR / name
+    err = _fetch(f"{LLAMA_RELEASES}/download/{LLAMA_BUILD}/{name}", archive, size, sha256)
+    if err:
+        return err
+    new = Path(tempfile.mkdtemp(prefix="bin-", dir=LLM_DIR))
+    try:
+        err = _unpack(archive, new)
+        if err:
+            return err
+        exe = new / _llm_exe().name
+        if not exe.is_file():
+            return f"{name} has no {exe.name}"
+        code, out = _run([str(exe), "--version"], 60)
+        if code != 0:
+            return f"{exe.name} didn't run ({_last_line(out)})"
+        bin_dir = _llm_exe().parent
+        bin_dir.mkdir(exist_ok=True)
+        for f in sorted(new.iterdir(), key=lambda p: p.name == exe.name):
+            os.replace(f, bin_dir / f.name)
+        _unlink_quiet(archive)
+        return None
+    finally:
+        shutil.rmtree(new, ignore_errors=True)
+
+
+def _llm_check():
+    return None if _llm_run("Answer in one word.", "Say hello.", 0, 8, timeout=300) else "the model gave no answer"
+
+
+def _enhancer_todo():
+    """The steps of `setup enhancer install` here, shaped like _voice_todo's."""
+    import platform
+    exe, model = _llm_paths()
+    steps = []
+    if not exe:
+        asset = _llama_asset()
+        if not asset:
+            return None, (f"not possible here: llama.cpp publishes no CPU build for {sys.platform}"
+                          f" on {platform.machine()}.")
+        steps.append((f"llama.cpp {LLAMA_BUILD} ({_size(asset[1])}) from github.com, into {_llm_exe().parent}",
+                      asset[1] * 4, functools.partial(_get_llama, *asset)))
+    if not model:
+        size, sha = QWEN_PIN
+        gguf = LLM_DIR / QWEN_URL.rsplit("/", 1)[1]
+        minutes = [round(size * 8 / (mbit * 1e6) / 60) for mbit in (100, 10)]
+        steps.append((f"{gguf.name} ({_size(size)}: about {minutes[0]} minutes at 100 Mbit/s, {minutes[1]} at"
+                      f" 10) from huggingface.co, into {LLM_DIR}", size,
+                      functools.partial(_fetch, QWEN_URL, gguf, size, sha)))
+    steps.append(("a test answer from the model", 0, _llm_check))
+    return steps, None
 
 
 def _enhancer_page(done):
@@ -1981,60 +2449,124 @@ def _enhancer_page(done):
     if done:
         print(f"Status: installed ({Path(model).name}).")
         return
+    missing = " and ".join(n for n, have in (("the model", model), ("llama-cli", exe)) if not have)
+    print(f"Status: not installed (missing {missing}).")
+    _auto_block("enhancer", _enhancer_todo())
     steps = []
     if not model:
-        steps += [("Download the Q4_K_M file of Qwen3-4B-Instruct-2507 (about 2.5 GB) from:",
-                   "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF"),
+        steps += [("Download the Q4_K_M file of Qwen3-4B-Instruct-2507 (about 2.5 GB) from:", QWEN_PAGE),
                   ("Put it in this folder (keep only one .gguf there):", str(LLM_DIR))]
     if not exe:
-        steps += [("Download the newest llama.cpp release for your system from:",
-                   "https://github.com/ggml-org/llama.cpp/releases"),
-                  (f"Copy {_llm_exe().name} and the files beside it into:", str(_llm_exe().parent))]
-    missing = " and ".join(n for n, have in (("the model", model), ("llama-cli", exe)) if not have)
-    print(f"Status: not installed (missing {missing}).\n")
-    print(_steps(steps, again="/tfm setup enhancer"))
+        asset = _llama_asset()
+        steps += [(f"Download {asset[0] if asset else 'the CPU build for your system'} from:",
+                   f"{LLAMA_RELEASES}/tag/{LLAMA_BUILD}"),
+                  (f"Unpack it, and copy {_llm_exe().name} and the files beside it into:", str(_llm_exe().parent))]
+    print("\nOr by hand:\n" + _steps(steps, again="/tfm setup enhancer"))
 
 
-def _tokens_page(done):
+def _hf_token_file():
+    """Where huggingface_hub and its hf command keep the user's Hugging Face login."""
+    home = os.environ.get("HF_HOME") or os.path.join(os.environ.get("XDG_CACHE_HOME") or "~/.cache", "huggingface")
+    return Path(os.path.expanduser(os.environ.get("HF_TOKEN_PATH") or os.path.join(home, "token")))
+
+
+def _hf_token():
+    """The user's own Hugging Face login, from the environment or _hf_token_file(), or None. Read
+    only to download the gated tokenizer the user asked for, and never printed."""
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(var, "").strip():
+            return os.environ[var].strip()
+    try:            # a file saved by hand: Windows PowerShell 5.1's > writes UTF-16, Notepad can add a BOM
+        raw = _hf_token_file().read_bytes()
+        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text.strip() or None
+
+
+def _tokenizer_check():
+    global _TOKENIZER
+    _TOKENIZER = None                                 # load the new file
+    return None if prompt_tokens("warm lo-fi hip hop, rhodes, 80 BPM")[1] else "the file didn't load"
+
+
+def _tokenizer_todo():
+    """The steps of `setup tokenizer install` here, shaped like _voice_todo's."""
+    token = _hf_token()
+    if not token:
+        return None, ("it needs your Hugging Face login, and none was found on this computer.\n"
+                      + _steps([("Accept Google's Gemma terms with your Hugging Face account at:", TOKENIZER_PAGE),
+                                ("Make a read token at huggingface.co/settings/tokens and save it, as the file's"
+                                 " only text, in:", str(_hf_token_file())),
+                                "Or, instead of step 2, log in with Hugging Face's own command: hf auth login"],
+                               again="/tfm setup tokenizer"))
+    size, sha = TOKENIZER_PIN
+    refused = (f"Accept Google's Gemma terms at {TOKENIZER_PAGE} with the account you're logged in as,"
+               " check that the login is current, then run this again")
+    return [(f"tokenizer.json ({_size(size)}) from huggingface.co with your login, saved as {TOKENIZER_FILE}",
+             size, functools.partial(_fetch, TOKENIZER_URL, TOKENIZER_FILE, size, sha, token=token, refused=refused)),
+            ("a test count", 0, _tokenizer_check)], None
+
+
+def _tokenizer_page(done):
     print(f"Exact prompt-length check: Stable Audio 3 reads only the first {SA3_PROMPT_TOKENS} tokens"
           f" of a prompt, so gen refuses longer ones. Without this file it estimates at {CHARS_PER_TOKEN}"
           " characters a token.")
     if done:
         print("Status: installed.")
         return
-    print("Status: not installed (estimating).\n")
-    print(_steps([("Sign in to Hugging Face and accept Google's Gemma terms at:",
-                   "https://huggingface.co/google/t5gemma-b-b-ul2"),
-                  "Download tokenizer.json from its \"Files and versions\" tab.",
-                  ("Save it as:", str(TOKENIZER_FILE))], again="/tfm setup tokens"))
+    print("Status: not installed (estimating).")
+    _auto_block("tokenizer", _tokenizer_todo())
+    print("\nOr by hand:\n" + _steps([("Sign in to Hugging Face and accept Google's Gemma terms at:", TOKENIZER_PAGE),
+                                      "Download tokenizer.json from its \"Files and versions\" tab.",
+                                      ("Save it as:", str(TOKENIZER_FILE))], again="/tfm setup tokenizer"))
+
+
+# One optional extra: its name and what it adds (the list), whether it is installed, the page
+# `setup <name>` prints given that answer, the plan `setup <name> install` runs (_voice_todo's
+# shape), and what the install's last line says when it worked.
+Extra = namedtuple("Extra", "name what installed page plan done")
 
 
 def _setup_extras():
-    """The optional extras in order, as (name, what it adds, whether it is installed, the page
-    `setup <name>` prints given that answer). One table, so the list and the pages agree."""
+    """The optional extras in order. One table, so the list, the pages and the installs agree."""
     import dj                                   # stdlib, beside this file; only setup needs it
-    return [("statusline", "the playing track under Claude Code's prompt",
-             lambda: _statusline_state() == "radio", _statusline_page),
-            ("voice", "a natural DJ voice (Kokoro) instead of the system voice",
-             dj.kokoro_files_present, _voice_page),
-            ("enhancer", "turns a rough idea into a full prompt (enhance, egen)",
-             lambda: all(_llm_paths()), _enhancer_page),
-            ("tokens", "an exact prompt-length check instead of an estimate",
-             TOKENIZER_FILE.is_file, _tokens_page)]
+    return [Extra("statusline", "the playing track under Claude Code's prompt",
+                  lambda: _statusline_state() == "radio", _statusline_page,
+                  lambda: (None, "Claude adds the statusline's line to settings.json itself, so that Claude Code"
+                                 " asks you first. /tfm setup statusline shows the line."), ""),
+            Extra("voice", "a natural DJ voice (Kokoro) instead of the system voice",
+                  lambda: dj.kokoro_files_present() and bool(_voice_ready()), _voice_page, _voice_todo,
+                  "the DJ speaks with Kokoro from its next line."),
+            Extra("enhancer", "turns a rough idea into a full prompt (enhance, egen)",
+                  lambda: all(_llm_paths()), _enhancer_page, _enhancer_todo,
+                  'try /tfm enhance "lofi coffee music".'),
+            Extra("tokenizer", "an exact prompt-length check instead of an estimate",
+                  TOKENIZER_FILE.is_file, _tokenizer_page, _tokenizer_todo,
+                  "gen, enhance and egen count prompt tokens exactly now.")]
 
 
 def cmd_setup(args):
     """Setup, one step at a time. With no argument: the required steps as a checklist, the first
     unfinished one spelled out, then the optional extras. `setup statusline | voice | enhancer |
-    tokens`: the steps to add that extra, with this machine's paths. Read-only: it changes
-    nothing, so it is safe to run at any time."""
+    tokenizer`: what that extra adds, the plan of its automatic install and its steps by hand, with
+    this machine's paths. Both are read-only, safe to run at any time. `setup <extra> install` runs
+    that plan, after the skill has asked the user; the statusline's is Claude's own edit. It alone
+    returns an exit code, 1 when it didn't install."""
     sub = args[0].lower() if args else ""
-    if sub in ("statusline", "voice", "enhancer", "tokens"):       # inline, for readme_check.py
-        _, _, installed, page = next(e for e in _setup_extras() if e[0] == sub)
-        page(installed())
+    if sub == "tokens":                                       # the tokenizer's old name
+        sub = "tokenizer"
+    if sub in ("statusline", "voice", "enhancer", "tokenizer"):       # inline, for readme_check.py
+        extra = next(e for e in _setup_extras() if e.name == sub)
+        if len(args) == 1:
+            extra.page(extra.installed())
+        elif len(args) == 2 and args[1].lower() == "install":
+            return _install(extra)
+        else:
+            print(f"Usage: radio setup {sub} [install]")
         return
     if sub:
-        print("Usage: radio setup | radio setup statusline | voice | enhancer | tokens")
+        print("Usage: radio setup | radio setup statusline | voice | enhancer | tokenizer [install]")
         return
     rows = _setup_required()
     print("Terminal FM setup\n")
@@ -2046,9 +2578,9 @@ def cmd_setup(args):
     else:
         title, _, text = rows[todo]
         print(f"\n{SETUP_RULE}\nStep {todo + 1} of {len(rows)}: {title}\n\n{text}\n{SETUP_RULE}")
-    print("\nOptional extras (/tfm setup <name> shows how to add one):")
-    for name, what, installed, _ in _setup_extras():
-        print(f"  [{'x' if installed() else ' '}] {name:<12}{what}")
+    print("\nOptional extras (/tfm setup <name> shows one, and how to add it):")
+    for e in _setup_extras():
+        print(f"  [{'x' if e.installed() else ' '}] {e.name:<12}{e.what}")
 
 
 def cmd_say(args):
@@ -2895,8 +3427,8 @@ def main(argv):
                 names.append(k)
         print(f"Unknown command '{cmd}'. Use: {' | '.join(names)}")
         return
-    handler(rest)
+    return handler(rest)            # the exit code: only `setup <extra> install` returns one
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))

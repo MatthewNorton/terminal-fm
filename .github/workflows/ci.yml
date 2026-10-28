@@ -37,7 +37,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
 
+      # The newest-Python jobs also download and run the pinned llama.cpp build for their system
+      # (12-20 MB): the only real run of `setup enhancer install`'s .tar.gz route on macOS and Linux.
       - name: Unit tests
+        env:
+          TERMINAL_FM_NETWORK_TESTS: ${{ matrix.python == '3.x' && '1' || '' }}
         run: python -m unittest discover tests -v
 
       - name: Smoke test
