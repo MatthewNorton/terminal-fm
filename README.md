@@ -238,6 +238,8 @@ Picking tracks by number:
 - One number is always a length, never a count. A lone number under 10 is refused as a likely mistake; for 3 tracks, type `gen "<prompt>" 3 auto`.
 - More than 20 tracks asks you to type `yes`.
 
+**File names.** A new track is named after the start of its prompt, up to 60 characters and cut at a whole word, then the date, time and its number: `warm lo-fi hip hop, rhodes, vinyl crackle, 80 BPM` is saved as `warm-lo-fi-hip-hop-rhodes-vinyl-crackle-80-bpm-20261028-190000-1.mp3`. That stays well inside the file name and path limits of Windows, macOS and Linux. Tracks made before this keep their names.
+
 **How the length is picked** when you don't type one:
 
 1. A length written in the prompt wins: "90 second trailer" gets 90s, while "80s synthwave" stays a decade.

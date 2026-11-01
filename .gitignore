@@ -1,4 +1,4 @@
-# Terminal FM release tree: two kinds of files never ship.
+# Terminal FM release tree: three kinds of files never ship.
 #
 # 1. Secrets and per-machine runtime state. The API key, the config overlay, the
 #    daemon's state/queue/position files, logs, generation history, listing snapshots,
@@ -45,3 +45,11 @@ llm/bin/
 llm/bin-*/
 llm/llama-*-bin-*
 llm/t5gemma-tokenizer.json
+
+# 3. Claude Code's per-user files. .claude/CLAUDE.md is the project's shared notes and
+#    ships; everything else Claude Code writes under .claude/ belongs to one person, such
+#    as settings.local.json and the agent worktrees in worktrees/. CLAUDE.local.md is a
+#    person's private notes for the project.
+.claude/*
+!.claude/CLAUDE.md
+CLAUDE.local.md

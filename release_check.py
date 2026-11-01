@@ -53,14 +53,16 @@ MAX_BYTES = 5 * 1024 * 1024
 SNIFF_BYTES = 8 * 1024
 MARKERS_FILE = ".release_markers"
 
-# Runtime, personal and downloaded files; keep in step with .gitignore. A trailing "/" marks
-# a directory, a "/" inside anchors the pattern to the root, otherwise it matches any path part.
+# Runtime, personal and downloaded files: .gitignore's lines, in its order (a test compares them).
+# A trailing "/" marks a directory, a "/" inside anchors the pattern to the root, otherwise it
+# matches any path part. As in git, a "!" line un-ignores, and the last matching line decides.
 IGNORED = [
     ".key", "config.json", ".kokoro_python", "*.jsonl", "*.log", "state.json",
     "nowplaying.txt", "last_list.json", "last_archive.json",
-    "resume.json", "playlist.json", "breaking.txt", "dj_speaking.lock", "queue/", "output/",
-    "_dj*.wav", "__pycache__/", ".readme_sync/", MARKERS_FILE,
+    "resume.json", "playlist.json", "breaking.txt", "dj_speaking.lock", ".hook_seen", "queue/",
+    "output/", "_dj*.wav", "__pycache__/", ".readme_sync/", MARKERS_FILE,
     "kokoro/*.onnx", "kokoro/*.bin", "llm/*.gguf", "llm/bin/", "llm/t5gemma-tokenizer.json",
+    ".claude/*", "!.claude/CLAUDE.md", "CLAUDE.local.md",
 ]
 
 # Patterns that name no one, so they can ship. A GitHub no-reply address is not a personal
@@ -79,25 +81,29 @@ PATTERNS = [
 JOIN_RE = re.compile(r"[\"']\s*\+?\s*[\"']")
 
 
-def is_ignored(rel):
-    """True when the forward-slash relative path matches an IGNORED pattern."""
+def _matches(rel, pat):
+    """True when the forward-slash relative path matches one IGNORED pattern (without its "!")."""
     parts = rel.split("/")
     dirs = parts[:-1]
+    if pat.endswith("/"):
+        want = pat[:-1]
+        if "/" in want:
+            prefixes = ["/".join(dirs[:i + 1]) for i in range(len(dirs))]
+            return any(fnmatch.fnmatchcase(p, want) for p in prefixes)
+        return any(fnmatch.fnmatchcase(d, want) for d in dirs)
+    if "/" in pat:
+        return fnmatch.fnmatchcase(rel, pat)
+    return any(fnmatch.fnmatchcase(p, pat) for p in parts)
+
+
+def is_ignored(rel):
+    """True when the forward-slash relative path is ignored: the last IGNORED pattern it matches
+    decides, and a "!" pattern un-ignores."""
+    ignored = False
     for pat in IGNORED:
-        if pat.endswith("/"):
-            want = pat[:-1]
-            if "/" in want:
-                prefixes = ["/".join(dirs[:i + 1]) for i in range(len(dirs))]
-                if any(fnmatch.fnmatchcase(p, want) for p in prefixes):
-                    return True
-            elif any(fnmatch.fnmatchcase(d, want) for d in dirs):
-                return True
-        elif "/" in pat:
-            if fnmatch.fnmatchcase(rel, pat):
-                return True
-        elif any(fnmatch.fnmatchcase(p, pat) for p in parts):
-            return True
-    return False
+        if _matches(rel, pat.lstrip("!")):
+            ignored = not pat.startswith("!")
+    return ignored
 
 
 def markers_path(root, given=None):
