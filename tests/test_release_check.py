@@ -19,6 +19,7 @@ if str(REPO) not in sys.path:
 import release_check as rc  # noqa: E402
 
 BS = chr(92)
+GITIGNORE = (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
 
 
 def j(*parts, sep="/"):
@@ -126,8 +127,16 @@ class Patterns(unittest.TestCase):
 
     def test_marker_file_never_ships(self):
         self.assertTrue(rc.is_ignored(rc.MARKERS_FILE))
-        ignore = (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
-        self.assertIn(rc.MARKERS_FILE, ignore)
+        self.assertIn(rc.MARKERS_FILE, GITIGNORE)
+
+    def test_ignored_is_gitignore(self):
+        self.assertEqual([ln for ln in GITIGNORE if ln and not ln.startswith("#")], rc.IGNORED)
+
+    def test_claude_code_personal_files_never_ship(self):
+        for rel in (".claude/settings.local.json", ".claude/worktrees/agent-1/radio.py",
+                    ".claude/worktrees/agent-1/.claude/CLAUDE.md", "CLAUDE.local.md"):
+            self.assertTrue(rc.is_ignored(rel), rel)
+        self.assertFalse(rc.is_ignored(".claude/CLAUDE.md"))
 
 
 if __name__ == "__main__":
