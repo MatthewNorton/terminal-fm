@@ -16,6 +16,7 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 - `radio key` keeps the key file owner-only (`0600` on POSIX) when the rename of its temp file is refused. That fallback used to rewrite the key through the general file writer, which creates files with the default permissions (readable by other users under a typical umask), and only restricted it afterwards.
 - `radio key show` says whether a key is set and where it came from, and no longer prints the key's first 6 characters.
+- `.gitignore` keeps Claude Code's per-user files out of the repository: `CLAUDE.local.md`, and everything under `.claude/` (such as `settings.local.json` and agent worktrees) except the shared `.claude/CLAUDE.md`. `release_check.py` now reads `!` lines as git does and holds exactly `.gitignore`'s list (a test compares the two), so it flags any of these files if one is force-added, and `.hook_seen` too, which its list had missed.
 
 ## [1.1.0] - 2026-10-19
 
