@@ -119,6 +119,23 @@ def pinned_python(cfg):
     return str(p) if p and Path(str(p)).exists() else None
 
 
+def last_line(text):
+    """The last non-empty line of a program's output, for a message: NULs dropped (onnxruntime and
+    some Windows tools write UTF-16, and the exception comes last), cut to 200 characters. radio.py's
+    install steps report their helper programs with it too."""
+    lines = [ln.strip() for ln in (text or "").replace("\0", "").splitlines() if ln.strip()]
+    return lines[-1][:200] if lines else "no output"
+
+
+def _cached_python():
+    """The interpreter .kokoro_python names, when the file and that interpreter exist; else None."""
+    try:
+        cached = KOKORO_PY_CACHE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return None
+    return cached if cached and Path(cached).exists() else None
+
+
 def _kokoro_python(cfg, check=False):
     """Find a Python that has kokoro_onnx; cache it.
 
@@ -126,20 +143,17 @@ def _kokoro_python(cfg, check=False):
     dropped the DJ to the robotic SAPI voice. Instead of trusting whoever launched us, locate
     ANY interpreter that can actually run Kokoro (the voice's own environment, the current one, its
     python.exe sibling, then PATH, then Pythons installed beside those) and reuse it. The cache is
-    validated by existence only (fast) and self-heals: a failed render clears it so the next call
-    re-probes. `check` (radio setup) tests the configured and cached interpreters too, and caches
-    nothing: the answer is the interpreter the DJ would end up rendering with.
+    validated by existence only (fast) and self-heals: a failed render clears it and searches again,
+    for that same line (_kokoro_render). `check`
+    (radio setup) tests the configured and cached interpreters too, and caches nothing: the answer
+    is the interpreter the DJ ends up rendering with.
     """
     cfgpy = pinned_python(cfg)                         # 1) explicit override: dj.python in config
     if cfgpy:
         return cfgpy if not check or _has_kokoro(cfgpy) else None
-    try:                                               # 2) previously-confirmed interpreter
-        if KOKORO_PY_CACHE.exists():
-            cached = KOKORO_PY_CACHE.read_text(encoding="utf-8").strip()
-            if cached and Path(cached).exists() and (not check or _has_kokoro(cached)):
-                return cached
-    except Exception:
-        pass
+    cached = _cached_python()                          # 2) previously-confirmed interpreter
+    if cached and (not check or _has_kokoro(cached)):
+        return cached
     venv = venv_python()                               # 3) probe: our venv, us, python.exe sibling, PATH
     cands = [str(venv)] if venv.exists() else []
     exe = sys.executable or ""
@@ -227,12 +241,33 @@ def _side_by_side():
 
 
 def kokoro_files_present():
-    """The Kokoro model and voices are downloaded (README: Optional extras). `radio setup` asks too."""
+    """The Kokoro model and voices are downloaded (README: Optional extras)."""
     return (KOKORO_DIR / KOKORO_VOICES).exists() and any((KOKORO_DIR / m).exists() for m in KOKORO_MODELS)
 
 
+def _render_with(py, script, voice, text):
+    """One kokoro_tts.py run on `py`: the WAV's Path, or None after logging why."""
+    out = ROOT / f"_dj_{os.getpid()}.wav"             # per-process: no cross-process clobber
+    try:
+        r = subprocess.run([py, str(script), "--out", str(out), "--voice", voice],
+                           input=text.encode("utf-8"), stdout=DEVNULL, stderr=subprocess.PIPE,
+                           timeout=120, creationflags=CREATE_NO_WINDOW)
+        if r.returncode == 0 and out.exists():
+            return out
+        err = last_line((r.stderr or b"").decode("utf-8", "replace"))
+        _kokoro_log("kokoro-fail", f"rc={r.returncode} ({py}) {err}", text)
+    except Exception as e:
+        _kokoro_log("kokoro-fail", f"exception ({py}) {e}", text)
+    return None
+
+
 def _kokoro_render(text):
-    """Render text -> WAV with Kokoro-82M. Returns Path or None (logging why, on failure)."""
+    """Render text -> WAV with Kokoro-82M. Returns Path or None (logging why, on failure).
+
+    A failed render drops the cached interpreter and searches again; when the search finds another
+    one (the cached one lost kokoro_onnx, or has a kokoro-onnx too old for the model while the voice's
+    own environment comes first), this same line renders with it. So the DJ speaks with the
+    interpreter `radio setup`'s check names, even after a stale cache. dj.python is never replaced."""
     global _kokoro_last
     _kokoro_last = "fail"
     script = CODE_DIR / "kokoro_tts.py"
@@ -247,26 +282,18 @@ def _kokoro_render(text):
         return None
     _cleanup_tmp()
     voice = cfg.get("kokoro_voice", DJ_DEFAULTS["kokoro_voice"])
-    out = ROOT / f"_dj_{os.getpid()}.wav"             # per-process: no cross-process clobber
-    try:
-        r = subprocess.run([py, str(script), "--out", str(out), "--voice", voice],
-                           input=text.encode("utf-8"), stdout=DEVNULL, stderr=subprocess.PIPE,
-                           timeout=120, creationflags=CREATE_NO_WINDOW)
-        if r.returncode == 0 and out.exists():
-            _kokoro_last = ""
-            return out
-        # The last line is the exception; onnxruntime's warnings come first, in UTF-16 on Windows.
-        lines = [l.strip() for l in (r.stderr or b"").decode("utf-8", "replace").replace("\0", "").splitlines()]
-        err = ([l for l in lines if l] or [""])[-1][:160]
-        _kokoro_log("kokoro-fail", f"rc={r.returncode} ({py}) {err}", text)
-    except Exception as e:
-        _kokoro_log("kokoro-fail", f"exception ({py}) {e}", text)
-    try:                                               # self-heal: drop a bad cached interpreter
-        if KOKORO_PY_CACHE.exists() and not cfg.get("python"):
+    out = _render_with(py, script, voice, text)
+    if not out and not pinned_python(cfg):
+        try:                                           # self-heal: drop a bad cached interpreter
             KOKORO_PY_CACHE.unlink()
-    except Exception:
-        pass
-    return None
+        except Exception:
+            pass
+        found = _kokoro_python(cfg)                    # and search again, for this very line
+        if found and found != py:
+            out = _render_with(found, script, voice, text)
+    if out:
+        _kokoro_last = ""
+    return out
 
 
 def _kokoro_why():

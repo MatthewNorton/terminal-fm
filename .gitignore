@@ -32,13 +32,15 @@ __pycache__/
 #    llama.cpp binaries and the gated T5Gemma tokenizer. The folders ship empty
 #    (.gitkeep) so the code finds them where it expects. `radio setup <extra> install`
 #    also leaves the voice's own Python environment, downloads in progress (.part),
-#    llama.cpp's archive when its install stopped, and its unpacking folder (bin-*).
+#    llama.cpp's archive when its install stopped, and its unpacking folder (bin-*);
+#    llm/.answered records which llama-cli and model last answered.
 kokoro/*.onnx
 kokoro/*.bin
 kokoro/*.part
 kokoro/venv/
 llm/*.gguf
 llm/*.part
+llm/.answered
 llm/bin/
 llm/bin-*/
 llm/llama-*-bin-*

@@ -7,13 +7,14 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 ### Added
 
 - `/tfm setup <extra>` can install the extra for you. Claude shows what it would download, the disk space it needs and what it costs in Claude tokens, and asks first. `setup <extra> install` downloads each file from its publisher at a tested version, checks it against the publisher's SHA-256, runs a test, continues a stopped download when run again, and exits with 1 when it didn't install. The statusline's line is added by Claude, and Claude Code asks before `settings.json` changes.
-- The DJ voice's automatic install gives it its own Python environment, `~/.claude/terminal-fm/kokoro/venv`, and installs Python 3.13 first when no Python from 3.10 to 3.13 is found (winget on Windows, Homebrew on macOS).
+- The DJ voice's automatic install gives it its own Python environment, `~/.claude/terminal-fm/kokoro/venv`, and installs Python 3.13 first when no Python from 3.10 to 3.13 is found and winget (Windows) or Homebrew (macOS) is there to do it. A voice file already in place is kept only at the size of the tested download or of the older model-files-v1.0 release's, so a download of your own that stopped is replaced.
 
 ### Changed
 
 - `setup tokens` is now `setup tokenizer`. The old name still works.
 - `setup` counts the DJ voice as installed only when a Python with kokoro-onnx 0.6 or newer can run it, not when the model files are there: kokoro-onnx 0.5.0 can't run the current model.
-- The DJ looks for the voice's packages in the voice's own environment first.
+- `setup` counts the prompt enhancer as installed once its `llama-cli` and model have given an answer, not when the files are there.
+- The DJ looks for the voice's packages in the voice's own environment first. When its cached Python fails a line, it searches again and speaks that line with any other Python it finds.
 
 ### Fixed
 

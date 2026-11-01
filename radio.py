@@ -1097,6 +1097,10 @@ SOURCES = {
 
 # --------------------------------------------------------------------------- prompt enhancement
 LLM_DIR = ROOT / "llm"
+# The llama-cli and model that last gave an answer, written by _llm_run: `setup` counts the enhancer
+# as installed only while that pair is still the one in use, so a model that never answered (a test
+# that timed out, a llama-cli without --single-turn) isn't reported installed.
+LLM_ANSWERED = LLM_DIR / ".answered"
 # Bounds for gen's auto-picked duration (pick_duration), also stated to the model so its answer
 # isn't silently truncated. 1-380s is the API's documented duration range: the length should be
 # whatever suits the prompt, from a one-second sting up to a long build. Real generations have
@@ -1335,7 +1339,28 @@ def _llm_run(system, user, temp, n_predict, timeout=180, top_p=None, top_k=None,
             timeout=timeout, creationflags=CREATE_NO_WINDOW).stdout
     except Exception:
         return ""
-    return _strip_cli_chrome(out, user)
+    answer = _strip_cli_chrome(out, user)
+    if answer and _llm_answered() != [exe, model]:
+        try:
+            _write_json(LLM_ANSWERED, [exe, model])
+        except OSError:
+            pass                                      # setup then offers the test; the answer still counts
+    return answer
+
+
+def _llm_answered():
+    """[llama-cli, model] as they were when one last answered (LLM_ANSWERED), or None."""
+    try:
+        pair = json.loads(LLM_ANSWERED.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return pair if isinstance(pair, list) and len(pair) == 2 else None
+
+
+def _enhancer_ready():
+    """llama-cli and a model are here, and that pair has answered."""
+    paths = list(_llm_paths())
+    return all(paths) and _llm_answered() == paths
 
 
 # Qwen sampling for the enhancer: section 3 of Qwen3_4B_SA3_Enhancer_Setup_v1.0.md (Qwen's own
@@ -1930,6 +1955,10 @@ def _setup_required():
 KOKORO_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/"
 KOKORO_PINS = {"kokoro-v1.0.fp16.onnx": (163_527_961, "f3a290d384fbb27966d462905c71a46cef9e5fd00516b40df32a0b4afe77ac96"),
                "voices-v1.0.bin": (28_214_398, "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d")}
+# The same two files from model-files-v1.0, which kokoro-onnx 0.6.1 runs too: GitHub lists their sizes
+# but no digest (checked 2026-11-01). A file of either size is kept; any other size, such as a hand
+# download that stopped, is downloaded again.
+KOKORO_V10_SIZES = {"kokoro-v1.0.fp16.onnx": 177_464_787, "voices-v1.0.bin": 28_214_398}
 # llama.cpp's CPU builds, by system and processor. b11669 is the build its v0.7.0 release points at.
 LLAMA_RELEASES = "https://github.com/ggml-org/llama.cpp/releases"
 LLAMA_BUILD = "b11669"
@@ -1955,13 +1984,17 @@ BREW_BINS = "/opt/homebrew/bin:/usr/local/bin"    # Homebrew's programs on Apple
 # Claude's part of an install once the user says yes: (API calls, new tokens, how it was found). Measured
 # on SETUP_COST_DATE with `claude -p` and Claude Opus 5.5, `/tfm setup <extra>` and then "Install it" in
 # a new session, from the usage Claude Code reported: voice 1,419 new tokens, enhancer 2,513 (run in the
-# background, so it reads its output when done), tokenizer 1,308. The voice's ran in the foreground with a
-# Python already there; the skill runs one that installs Python first in the background (not measured).
+# background, so it reads its output when done), tokenizer 1,308. The voice's ran in the foreground, but
+# the skill now runs every voice install in the background like the enhancer's, because the Bash tool
+# stops a command at 10 minutes: the two model files (191,742,359 bytes) alone pass that below 2.56 Mbit/s
+# (x 8 / 600 s), and pip may take its 900 s. So the voice's figure is the enhancer's background run, an
+# estimate until measured. The tokenizer stays in the foreground: its 34 MB pass 10 minutes only below
+# 0.46 Mbit/s, and running it again continues the download.
 # New tokens are the install's output and Claude's replies; every call also re-reads the conversation so
 # far, 45k tokens in that new session. The statusline couldn't be measured without editing the real
 # settings.json: its 3 calls are a Read, an Edit and the reply, and its tokens are estimated at the
 # measured ~0.65k a call plus a settings.json's text.
-SETUP_COST = {"statusline": (3, 3000, "estimated"), "voice": (2, 1400, "measured"),
+SETUP_COST = {"statusline": (3, 3000, "estimated"), "voice": (4, 2500, "estimated"),
               "enhancer": (4, 2500, "measured"), "tokenizer": (2, 1300, "measured")}
 SETUP_COST_DATE = "2026-10-21"
 
@@ -1971,16 +2004,15 @@ def _size(n):
     return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{max(1, round(n / 1e6))} MB"
 
 
-def _last_line(text):
-    """The last non-empty line of a helper program's output, for a message (NULs dropped: some
-    Windows tools write UTF-16)."""
-    lines = [ln.strip() for ln in (text or "").replace("\0", "").splitlines() if ln.strip()]
-    return lines[-1][:200] if lines else "no output"
-
-
 def _sha256(path):
     with open(path, "rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def _origin(url):
+    """A URL's (scheme, host, port): where a login may go, and whether an answer came from there."""
+    u = urllib.parse.urlsplit(url)
+    return u.scheme, u.hostname, u.port
 
 
 class _LoginStaysOnHost(urllib.request.HTTPRedirectHandler):
@@ -1991,47 +2023,94 @@ class _LoginStaysOnHost(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = super().redirect_request(req, fp, code, msg, headers, newurl)
         auth = req.unredirected_hdrs.get("Authorization")
-        old, nxt = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
-        if new is not None and auth and (old.scheme, old.hostname, old.port) == (nxt.scheme, nxt.hostname, nxt.port):
+        if new is not None and auth and _origin(req.full_url) == _origin(newurl):
             new.add_unredirected_header("Authorization", auth)
         return new
+
+
+def _download_context():
+    """TLS for the installs' downloads: the system's certificates, plus stability_api.ca_bundle's
+    when it names a file. The API's context (_ssl_context) checks that file alone, because it is set
+    where the system's path to the API's chain fails; a download from GitHub, Hugging Face or their
+    CDNs still has to verify when the file holds only the API's chain."""
+    ctx, bundle = ssl.create_default_context(), _ca_bundle()
+    if bundle:
+        ctx.load_verify_locations(bundle)
+    return ctx
+
+
+def _part(dest):
+    """Where a download of `dest` collects until it passes its check."""
+    return dest.with_name(dest.name + ".part")
+
+
+def _still_to_fetch(dest, size):
+    """The bytes a download of `dest` still needs: none when the file is already there whole, else
+    its size less what a stopped download left in its .part. The plans count this, so a download a
+    full disk stopped fits again once the rest of it is free."""
+    if dest.is_file() and dest.stat().st_size == size:
+        return 0
+    part = _part(dest)
+    return max(0, size - (part.stat().st_size if part.is_file() else 0))
+
+
+def _fetch_step(what, url, dest, size, sha256, **kw):
+    """A plan's download step: what it says, the bytes still to come and the _fetch that gets them."""
+    return what, _still_to_fetch(dest, size), functools.partial(_fetch, url, dest, size, sha256, **kw)
 
 
 def _fetch(url, dest, size, sha256, token=None, refused=""):
     """Download `url` to `dest` and check it against its published size and SHA-256. Returns None,
     or what went wrong. The bytes go to <dest>.part first, so a download that stops (a dropped
     connection, a killed command) continues from there the next time, with an HTTP Range request; a
-    file that fails the check is deleted. `token` goes to `url`'s own host only, never to a host it
-    redirects to: GitHub and Hugging Face both hand the file over from a CDN, which needs no login.
-    `refused` follows the message for a 401 or 403."""
+    file that fails the check is deleted. It is hashed as it arrives, the .part's earlier bytes
+    once, so a 2.5 GB file isn't read again to check it. `token` goes to `url`'s own host only, never
+    to a host it redirects to: GitHub and Hugging Face both hand the file over from a CDN, which
+    needs no login. `refused` follows the message for a 401 or 403 from `url`'s own host."""
     if dest.is_file() and dest.stat().st_size == size and _sha256(dest) == sha256:
         return None
     dest.parent.mkdir(parents=True, exist_ok=True)
-    part = dest.with_name(dest.name + ".part")
+    part = _part(dest)
     have = part.stat().st_size if part.is_file() else 0
-    host = urllib.parse.urlsplit(url).hostname
+    digest = None
     if have < size:
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         if have:
             req.add_header("Range", f"bytes={have}-")
         if token:
             req.add_unredirected_header("Authorization", f"Bearer {token}")
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _LoginStaysOnHost)
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_download_context()),
+                                             _LoginStaysOnHost)
         try:
-            with opener.open(req, timeout=60) as r, \
-                    open(part, "ab" if have and r.status == 206 else "wb") as f:   # 200: from the top
-                shutil.copyfileobj(r, f, 1 << 20)
+            with opener.open(req, timeout=60) as r:
+                resume = have and r.status == 206     # 200: the whole file again, from the top
+                if resume:
+                    with open(part, "rb") as f:
+                        digest = hashlib.file_digest(f, "sha256")
+                else:
+                    digest = hashlib.sha256()
+                with open(part, "ab" if resume else "wb") as f:
+                    while chunk := r.read(1 << 20):
+                        digest.update(chunk)
+                        f.write(chunk)
         except urllib.error.HTTPError as e:
+            answered = _origin(e.url or url)          # after a redirect, the CDN that refused
+            msg = f"{answered[1]} answered HTTP {e.code}"
             if e.code == 416:                         # the .part doesn't fit the file: start over
                 _unlink_quiet(part)
-            msg = f"{host} answered HTTP {e.code}"
-            return f"{msg}. {refused}" if refused and e.code in (401, 403) else msg
+                return f"{msg}. Run the same command again to start the download over"
+            if refused and e.code in (401, 403) and answered == _origin(url):
+                return f"{msg}. {refused}"
+            return msg
         except Exception as e:
-            why = f"{type(e).__name__}: {e}"
+            # With a login sent, only an OS error (the network, a locked .part, a full disk) keeps its
+            # text: any other could quote the request, Authorization header and all.
+            why = f"{type(e).__name__}: {e}" if not token or isinstance(e, OSError) else type(e).__name__
             if isinstance(getattr(e, "reason", e), ssl.SSLCertVerificationError):   # rerunning won't help
                 bundle = _ca_bundle()
-                return f"{host}'s certificate didn't verify ({why})" + (
-                    f", checked against stability_api.ca_bundle ({bundle})" if bundle else "")
+                return f"{_origin(url)[1]}'s certificate didn't verify ({why})" + (
+                    f", checked against your system's certificates and stability_api.ca_bundle ({bundle})"
+                    if bundle else "")
             if isinstance(e, (urllib.error.URLError, http.client.HTTPException, ConnectionError,
                               TimeoutError, ssl.SSLError)):         # DNS, a dropped connection
                 return f"the download stopped ({why}). Run the same command again to continue it"
@@ -2039,7 +2118,7 @@ def _fetch(url, dest, size, sha256, token=None, refused=""):
     got = part.stat().st_size
     if got < size:
         return f"the download stopped at {_size(got)} of {_size(size)}. Run the same command again to continue it"
-    if got > size or _sha256(part) != sha256:
+    if got > size or (digest.hexdigest() if digest else _sha256(part)) != sha256:
         _unlink_quiet(part)
         return f"{dest.name} didn't match its published SHA-256, so it was deleted"
     os.replace(part, dest)
@@ -2058,8 +2137,9 @@ def _member_parts(name):
 
 def _unpack(archive, dest):
     """Unpack a llama.cpp release into `dest`: a .zip as it is, a .tar.gz without its one top folder.
-    Plain files only, and links to a file beside them; any other member, or a path that is absolute,
-    names a drive or climbs out with .., refuses the whole archive. Returns None, or why it refused."""
+    Plain files only, and links to a file beside them (a folder entry is skipped: its files make it);
+    any other member, or a path that is absolute, names a drive or climbs out with .., refuses the
+    whole archive. Returns None, or why it refused."""
     import tarfile
     import zipfile
     refused = f"{archive.name} holds something other than plain files, so it wasn't unpacked"
@@ -2083,7 +2163,7 @@ def _unpack(archive, dest):
             if not parts:
                 return refused
             tops.add(parts[0])
-            if len(parts) == 1 and m.isdir():         # the top folder itself
+            if m.isdir():                             # the top folder, or one inside it
                 continue
             link_ok = (m.issym() and m.linkname not in ("", ".", "..")
                        and m.linkname == PurePosixPath(m.linkname).name)
@@ -2193,7 +2273,7 @@ def _statusline_page(done):
         else:
             steps = [("Create this file:", str(settings)), ("Put this in it:", entry)]
         print("Status: not set up.")
-        print(f"\nAutomatic install: Claude adds the line below to {settings.name} for you, and"
+        print(f"\nAutomatic install (Claude edits {settings.name}): Claude adds the line below for you, and"
               f" Claude Code asks you before that file changes.\n{_claude_part('statusline')}")
         print("\nOr by hand:")
         print(_steps(steps + ["Save it. If the line doesn't show at your next prompt, restart Claude Code."]))
@@ -2234,12 +2314,24 @@ def _voice_python():
     found = next(dj._side_by_side(), None)
     if found:
         return found
-    if IS_WIN:
-        major, minor = dj.PY_VOICE_MAX
-        p = os.path.expandvars(rf"%LOCALAPPDATA%\Programs\Python\Python{major}{minor}\python.exe")
-        return p if os.path.isfile(p) else None
+    if IS_WIN:      # Python313, or with a suffix: 32-bit and ARM64 installs add one (not tried on those)
+        home = Path(os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python"))
+        found = sorted(home.glob("Python%d%d*/python.exe" % dj.PY_VOICE_MAX))
+        return str(found[0]) if found else None
     if sys.platform == "darwin":
         return shutil.which("python%d.%d" % dj.PY_VOICE_MAX, path=BREW_BINS)
+    return None
+
+
+def _python_getter():
+    """The program that installs the voice's Python for this user: winget on Windows (its App
+    Installer link too, which Claude Code's shells may not have on PATH), Homebrew on macOS. None
+    elsewhere, or when it isn't installed."""
+    if IS_WIN:
+        alias = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe")
+        return shutil.which("winget") or (alias if os.path.isfile(alias) else None)
+    if sys.platform == "darwin":
+        return shutil.which("brew") or shutil.which("brew", path=BREW_BINS)
     return None
 
 
@@ -2249,19 +2341,17 @@ def _get_python():
     afterwards, else why not."""
     import dj
     ver = "%d.%d" % dj.PY_VOICE_MAX
-    cmd = _install_cmd("python", ver)[1].split()
-    if IS_WIN:      # winget's folder is on PATH in a user's terminal, but not always in Claude Code's
-        cmd[0] = shutil.which("winget") or os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe")
+    tool = _python_getter()
+    if not tool:                                      # the plan doesn't offer this step without one
+        return f"{'winget' if IS_WIN else 'Homebrew'} isn't installed: install Python {ver} yourself, then run this again"
+    cmd = [tool] + _install_cmd("python", ver)[1].split()[1:]
+    if IS_WIN:
         cmd += ["-e", "--scope", "user", "--silent", "--accept-package-agreements",
                 "--accept-source-agreements", "--disable-interactivity"]
-    else:
-        cmd[0] = shutil.which("brew") or shutil.which("brew", path=BREW_BINS)
-        if not cmd[0]:
-            return f"Homebrew isn't installed: install Python {ver} yourself, then run this again"
     _, out = _run(cmd, 900)
     if _voice_python():
         return None
-    return f"{Path(cmd[0]).name} didn't install Python {ver} ({_last_line(out)})"
+    return f"{Path(tool).name} didn't install Python {ver} ({dj.last_line(out)})"
 
 
 def _make_venv():
@@ -2274,7 +2364,7 @@ def _make_venv():
         return None
     if "ensurepip" in out:                            # Debian and Ubuntu leave venv out of python3
         return "this Python can't make environments. On Debian or Ubuntu: sudo apt install python3-venv"
-    return f"python -m venv failed ({_last_line(out)})"
+    return f"python -m venv failed ({dj.last_line(out)})"
 
 
 def _pip_voice():
@@ -2283,20 +2373,17 @@ def _pip_voice():
     py = str(dj.venv_python())
     code, out = _run([py, "-m", "pip", "--disable-pip-version-check", "-q"] + shlex.split(KOKORO_PIP_ARGS), 900)
     if code != 0:
-        return f"pip failed ({_last_line(out)})"
+        return f"pip failed ({dj.last_line(out)})"
     _atomic_write(dj.KOKORO_PY_CACHE, py)             # the DJ's interpreter from now on
     return None
 
 
-def _voice_check(ready=None):
+def _voice_check():
     """Render a line on the DJ's own path (dj._kokoro_render: its Python, its configured voice),
-    without playing it. None when it made speech. `ready` is the Python the plan found with the
-    packages, when it skipped pip: it becomes the DJ's cached one first, since the render trusts a
-    cached Python that merely exists, and a stale one would fail the line."""
+    without playing it. None when it made speech. A stale cached Python doesn't fail it: after a
+    failed render, dj searches again and retries the line with the interpreter it finds."""
     import dj
     import wave
-    if ready:
-        _atomic_write(dj.KOKORO_PY_CACHE, ready)
     wav = dj._kokoro_render("Terminal FM voice check.")
     if not wav:
         return f"the test line failed: {dj._kokoro_error}"
@@ -2311,8 +2398,8 @@ def _voice_todo():
     """The steps of `setup voice install` here, as (what, bytes on disk, action returning None or
     why it failed), and None; or None and why it can't run."""
     import dj
-    steps, ready = [], _voice_ready()
-    if not ready:
+    steps = []
+    if not _voice_ready():
         pinned = dj.pinned_python(dj.dj_config())
         if pinned:
             return None, (f"dj.python in config.json names {pinned}, which the DJ always uses, and it has no"
@@ -2320,24 +2407,44 @@ def _voice_todo():
                           " remove dj.python, then run /tfm setup voice again.")
         base, ver = _voice_python(), "%d.%d" % dj.PY_VOICE_MAX
         if not base:
+            need = "the voice needs Python %d.%d to %s, and none was found" % (*dj.PY_VOICE_MIN, ver)
             get = _install_cmd("python", ver)[1] if IS_WIN or sys.platform == "darwin" else ""
             if not get:
-                return None, ("not possible here: the voice needs Python %d.%d to %s, and none was found."
-                              " Install one with your package manager, then run /tfm setup voice again."
-                              % (*dj.PY_VOICE_MIN, ver))
+                return None, (f"not possible here: {need}. Install one with your package manager, then run"
+                              " /tfm setup voice again.")
+            if not _python_getter():
+                tool, other = (("winget", "App Installer from the Microsoft Store, which brings winget") if IS_WIN
+                               else ("Homebrew", "Homebrew from https://brew.sh"))
+                return None, (f"not possible here: {need}, and {tool}, which would install it, isn't on this"
+                              f" computer. Install Python {ver} from https://www.python.org/downloads/, or"
+                              f" {other}, then run /tfm setup voice again.")
             steps.append((f"Python {ver} for your user ({get})", 0, _get_python))
             base = f"Python {ver}"
         steps += [(f"a private Python environment in {dj.KOKORO_VENV}, made with {base}", 0, _make_venv),
                   ("kokoro-onnx and soundfile from PyPI, into that environment", VOICE_ENV_BYTES, _pip_voice)]
-    have = {n for n in KOKORO_PINS if (dj.KOKORO_DIR / n).exists()}
-    if any((dj.KOKORO_DIR / m).exists() for m in dj.KOKORO_MODELS):
-        have.add(dj.KOKORO_MODELS[0])                 # any of the three models will do
-    for name, (size, sha) in KOKORO_PINS.items():
-        if name not in have:
-            steps.append((f"{name} ({_size(size)}) from github.com", size,
-                          functools.partial(_fetch, KOKORO_URL + name, dj.KOKORO_DIR / name, size, sha)))
-    steps.append(("a test line, rendered but not played", 0, functools.partial(_voice_check, ready)))
+    for name in _kokoro_missing():
+        size, sha = KOKORO_PINS[name]
+        dest = dj.KOKORO_DIR / name
+        what = f"{name} ({_size(size)}) from github.com"
+        if dest.is_file():
+            what += ", replacing the file there, which is the wrong size"
+        steps.append(_fetch_step(what, KOKORO_URL + name, dest, size, sha))
+    steps.append(("a test line, rendered but not played", 0, _voice_check))
     return steps, None
+
+
+def _kokoro_missing():
+    """The pinned voice files `setup voice install` downloads: each one that isn't here at the size
+    of its download or of model-files-v1.0's, so a hand download that stopped is replaced. Another of
+    the three models will do while no fp16 model is there, since kokoro_tts.py loads that one first."""
+    import dj
+
+    def whole(name):
+        p = dj.KOKORO_DIR / name
+        return p.is_file() and p.stat().st_size in (KOKORO_PINS[name][0], KOKORO_V10_SIZES[name])
+    fp16 = dj.KOKORO_MODELS[0]
+    another = not (dj.KOKORO_DIR / fp16).exists() and any((dj.KOKORO_DIR / m).exists() for m in dj.KOKORO_MODELS[1:])
+    return [n for n in KOKORO_PINS if not whole(n) and not (n == fp16 and another)]
 
 
 def _voice_pip_steps():
@@ -2364,7 +2471,7 @@ def _voice_page(done):
     if done:
         print("Status: installed.")
         return
-    files = dj.kokoro_files_present()
+    files = not _kokoro_missing()
     print(f"Status: the model files are here, but no Python has {KOKORO_ONNX_NEED} and soundfile."
           if files else "Status: not installed.")
     _auto_block("voice", _voice_todo())
@@ -2389,6 +2496,7 @@ def _llama_asset():
 def _get_llama(name, size, sha256):
     """Download llama.cpp, unpack it beside llm/bin, check that llama-cli runs, then move it in,
     llama-cli last, so a stop halfway never leaves a llama-cli without its libraries."""
+    import dj
     import tempfile
     archive = LLM_DIR / name
     err = _fetch(f"{LLAMA_RELEASES}/download/{LLAMA_BUILD}/{name}", archive, size, sha256)
@@ -2404,7 +2512,7 @@ def _get_llama(name, size, sha256):
             return f"{name} has no {exe.name}"
         code, out = _run([str(exe), "--version"], 60)
         if code != 0:
-            return f"{exe.name} didn't run ({_last_line(out)})"
+            return f"{exe.name} didn't run ({dj.last_line(out)})"
         bin_dir = _llm_exe().parent
         bin_dir.mkdir(exist_ok=True)
         for f in sorted(new.iterdir(), key=lambda p: p.name == exe.name):
@@ -2416,7 +2524,15 @@ def _get_llama(name, size, sha256):
 
 
 def _llm_check():
+    """A test answer; _llm_run records the pair that gave it, which is what `installed` reads."""
     return None if _llm_run("Answer in one word.", "Say hello.", 0, 8, timeout=300) else "the model gave no answer"
+
+
+def _llama_wanted(exe):
+    """llama.cpp's pinned build belongs in llm/bin: none is there, and no llama-cli has answered (one
+    on PATH may lack --single-turn, which _llm_run passes)."""
+    answered = _llm_answered()
+    return not _llm_exe().exists() and not (exe and answered and answered[0] == exe)
 
 
 def _enhancer_todo():
@@ -2424,20 +2540,20 @@ def _enhancer_todo():
     import platform
     exe, model = _llm_paths()
     steps = []
-    if not exe:
-        asset = _llama_asset()
-        if not asset:
-            return None, (f"not possible here: llama.cpp publishes no CPU build for {sys.platform}"
-                          f" on {platform.machine()}.")
+    asset = _llama_asset() if _llama_wanted(exe) else None
+    if asset:
+        archive = LLM_DIR / asset[0]                  # the download, then about 3 times its size unpacked
         steps.append((f"llama.cpp {LLAMA_BUILD} ({_size(asset[1])}) from github.com, into {_llm_exe().parent}",
-                      asset[1] * 4, functools.partial(_get_llama, *asset)))
+                      _still_to_fetch(archive, asset[1]) + asset[1] * 3, functools.partial(_get_llama, *asset)))
+    elif not exe:
+        return None, (f"not possible here: llama.cpp publishes no CPU build for {sys.platform}"
+                      f" on {platform.machine()}.")
     if not model:
         size, sha = QWEN_PIN
         gguf = LLM_DIR / QWEN_URL.rsplit("/", 1)[1]
         minutes = [round(size * 8 / (mbit * 1e6) / 60) for mbit in (100, 10)]
-        steps.append((f"{gguf.name} ({_size(size)}: about {minutes[0]} minutes at 100 Mbit/s, {minutes[1]} at"
-                      f" 10) from huggingface.co, into {LLM_DIR}", size,
-                      functools.partial(_fetch, QWEN_URL, gguf, size, sha)))
+        steps.append(_fetch_step(f"{gguf.name} ({_size(size)}: about {minutes[0]} minutes at 100 Mbit/s,"
+                                 f" {minutes[1]} at 10) from huggingface.co, into {LLM_DIR}", QWEN_URL, gguf, size, sha))
     steps.append(("a test answer from the model", 0, _llm_check))
     return steps, None
 
@@ -2450,17 +2566,19 @@ def _enhancer_page(done):
         print(f"Status: installed ({Path(model).name}).")
         return
     missing = " and ".join(n for n, have in (("the model", model), ("llama-cli", exe)) if not have)
-    print(f"Status: not installed (missing {missing}).")
+    print(f"Status: not installed (missing {missing})." if missing
+          else "Status: llama-cli and the model are here, but haven't given an answer yet.")
     _auto_block("enhancer", _enhancer_todo())
     steps = []
     if not model:
         steps += [("Download the Q4_K_M file of Qwen3-4B-Instruct-2507 (about 2.5 GB) from:", QWEN_PAGE),
                   ("Put it in this folder (keep only one .gguf there):", str(LLM_DIR))]
-    if not exe:
+    if _llama_wanted(exe):
         asset = _llama_asset()
         steps += [(f"Download {asset[0] if asset else 'the CPU build for your system'} from:",
                    f"{LLAMA_RELEASES}/tag/{LLAMA_BUILD}"),
                   (f"Unpack it, and copy {_llm_exe().name} and the files beside it into:", str(_llm_exe().parent))]
+    steps.append(("Check that it answers:", '/tfm enhance "lofi coffee music"'))
     print("\nOr by hand:\n" + _steps(steps, again="/tfm setup enhancer"))
 
 
@@ -2472,16 +2590,20 @@ def _hf_token_file():
 
 def _hf_token():
     """The user's own Hugging Face login, from the environment or _hf_token_file(), or None. Read
-    only to download the gated tokenizer the user asked for, and never printed."""
+    only to download the gated tokenizer the user asked for, and never printed. Line breaks inside
+    it are dropped, as huggingface_hub does: urllib refuses a header with one, quoting the value."""
+    def clean(text):
+        return text.replace("\r", "").replace("\n", "").strip() or None
     for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(var, "").strip():
-            return os.environ[var].strip()
+        token = clean(os.environ.get(var, ""))
+        if token:
+            return token
     try:            # a file saved by hand: Windows PowerShell 5.1's > writes UTF-16, Notepad can add a BOM
         raw = _hf_token_file().read_bytes()
         text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return None
-    return text.strip() or None
+    return clean(text)
 
 
 def _tokenizer_check():
@@ -2503,8 +2625,8 @@ def _tokenizer_todo():
     size, sha = TOKENIZER_PIN
     refused = (f"Accept Google's Gemma terms at {TOKENIZER_PAGE} with the account you're logged in as,"
                " check that the login is current, then run this again")
-    return [(f"tokenizer.json ({_size(size)}) from huggingface.co with your login, saved as {TOKENIZER_FILE}",
-             size, functools.partial(_fetch, TOKENIZER_URL, TOKENIZER_FILE, size, sha, token=token, refused=refused)),
+    return [_fetch_step(f"tokenizer.json ({_size(size)}) from huggingface.co with your login, saved as {TOKENIZER_FILE}",
+                        TOKENIZER_URL, TOKENIZER_FILE, size, sha, token=token, refused=refused),
             ("a test count", 0, _tokenizer_check)], None
 
 
@@ -2530,16 +2652,15 @@ Extra = namedtuple("Extra", "name what installed page plan done")
 
 def _setup_extras():
     """The optional extras in order. One table, so the list, the pages and the installs agree."""
-    import dj                                   # stdlib, beside this file; only setup needs it
     return [Extra("statusline", "the playing track under Claude Code's prompt",
                   lambda: _statusline_state() == "radio", _statusline_page,
                   lambda: (None, "Claude adds the statusline's line to settings.json itself, so that Claude Code"
                                  " asks you first. /tfm setup statusline shows the line."), ""),
             Extra("voice", "a natural DJ voice (Kokoro) instead of the system voice",
-                  lambda: dj.kokoro_files_present() and bool(_voice_ready()), _voice_page, _voice_todo,
+                  lambda: not _kokoro_missing() and bool(_voice_ready()), _voice_page, _voice_todo,
                   "the DJ speaks with Kokoro from its next line."),
             Extra("enhancer", "turns a rough idea into a full prompt (enhance, egen)",
-                  lambda: all(_llm_paths()), _enhancer_page, _enhancer_todo,
+                  _enhancer_ready, _enhancer_page, _enhancer_todo,
                   'try /tfm enhance "lofi coffee music".'),
             Extra("tokenizer", "an exact prompt-length check instead of an estimate",
                   TOKENIZER_FILE.is_file, _tokenizer_page, _tokenizer_todo,

@@ -6,6 +6,7 @@ here uses the network, and every file lands in the temporary test home."""
 import hashlib
 import http.server
 import io
+import json
 import os
 import shutil
 import ssl
@@ -124,18 +125,72 @@ class Fetch(unittest.TestCase):
     def test_a_range_past_the_end_starts_over(self):
         self.dest.parent.mkdir(parents=True)
         self.part.write_bytes(b"x" * 10)
-        self.assertEqual(self.fetch(("status", 416)), "127.0.0.1 answered HTTP 416")
+        self.assertEqual(self.fetch(("status", 416)),
+                         "127.0.0.1 answered HTTP 416. Run the same command again to start the download over")
         self.assertFalse(self.part.exists())
 
-    def test_the_login_follows_a_redirect_only_on_the_same_host(self):
-        # A second server on another port is another host to the redirect, as a CDN is.
+    def other_server(self):
+        """A second server on another port, which is another host to a redirect, as a CDN is. It
+        serves the same routes."""
         other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Host)
         other.routes, other.seen = self.httpd.routes, self.httpd.seen
         threading.Thread(target=other.serve_forever, daemon=True).start()
         self.addCleanup(other.server_close)
         self.addCleanup(other.shutdown)
+        return f"http://127.0.0.1:{other.server_address[1]}"
+
+    def test_a_refusal_after_a_redirect_names_who_refused_and_not_the_login(self):
+        # An expired CDN link is a 403 too: the advice about the login is for the original host only.
+        self.httpd.routes["/cdn"] = ("status", 403)
+        self.assertEqual(self.fetch(("redirect", self.other_server() + "/cdn"), refused="Accept the terms"),
+                         "127.0.0.1 answered HTTP 403")
+        self.assertEqual(self.fetch(("redirect", "/cdn"), refused="Accept the terms"),
+                         "127.0.0.1 answered HTTP 403. Accept the terms")       # a hop on the same host
+        cdn = urllib.error.HTTPError("https://cdn-lfs.hf.co/repos/x", 403, "Forbidden", {}, None)
+        with mock.patch.object(urllib.request.OpenerDirector, "open", side_effect=cdn):
+            self.assertEqual(radio._fetch("https://huggingface.co/x", self.dest, 1, "0" * 64, refused="Accept"),
+                             "cdn-lfs.hf.co answered HTTP 403")
+
+    def test_with_a_login_sent_only_an_os_error_keeps_its_text(self):
+        # http.client quotes a header value it refuses, so such a message would carry the token out.
+        leak = ValueError("Invalid header value b'Bearer hf_secret_test_value'")
+        with mock.patch.object(urllib.request.OpenerDirector, "open", side_effect=leak):
+            self.assertEqual(self.fetch(("file", self.body), token="hf_secret_test_value"),
+                             "the download failed (ValueError)")
+        locked = PermissionError(13, "the .part is locked")
+        with mock.patch.object(urllib.request.OpenerDirector, "open", side_effect=locked):
+            self.assertIn("the .part is locked", self.fetch(("file", self.body), token="hf_secret_test_value"))
+
+    def test_the_file_is_hashed_as_it_arrives(self):
+        # _sha256 reads a whole file again: only the "already there" check before a download uses it.
+        with mock.patch.object(radio, "_sha256", side_effect=AssertionError("read the file again")):
+            self.assertIsNone(self.fetch(("file", self.body)))
+            self.dest.unlink()
+            self.part.write_bytes(self.body[:100_000])                 # resumed: its bytes count once
+            self.assertIsNone(self.fetch(("file", self.body)))
+            self.assertEqual(self.dest.read_bytes(), self.body)
+            self.dest.unlink()
+            self.part.write_bytes(b"x" * 100_000)                      # a .part of the wrong bytes
+            self.assertIn("didn't match its published SHA-256", self.fetch(("file", self.body)))
+        self.assertFalse(self.part.exists())
+        self.part.write_bytes(self.body)                               # whole, but stopped before its check
+        asked = len(self.httpd.seen)
+        self.assertIsNone(self.fetch(("file", self.body)))
+        self.assertEqual(len(self.httpd.seen), asked)                  # checked without a request
+
+    def test_downloads_trust_the_system_and_the_bundle(self):
+        # ca_bundle may hold only the API's chain: a download must still verify GitHub and Hugging Face.
+        pem = radio.ROOT / "only-the-api.pem"
+        pem.write_text("not read: the context is mocked", encoding="utf-8")
+        with mock.patch.dict(radio.CONFIG["stability_api"], ca_bundle=str(pem)), \
+                mock.patch.object(radio.ssl, "create_default_context") as make:
+            radio._download_context()
+        make.assert_called_once_with()                                 # the system's certificates...
+        make.return_value.load_verify_locations.assert_called_once_with(str(pem))   # ...plus the file's
+
+    def test_the_login_follows_a_redirect_only_on_the_same_host(self):
         self.httpd.routes["/cdn"] = ("file", self.body)
-        for where, kept in (("/cdn", True), (f"http://127.0.0.1:{other.server_address[1]}/cdn", False)):
+        for where, kept in (("/cdn", True), (self.other_server() + "/cdn", False)):
             with self.subTest(where):
                 self.httpd.seen.clear()
                 self.dest.unlink(missing_ok=True)
@@ -158,12 +213,12 @@ class Fetch(unittest.TestCase):
                 self.assertEqual("Run the same command again" in err, "Run the same" in want)
         pem = radio.ROOT / "isrg.pem"                  # named only when it exists, so it was the one used
         with mock.patch.dict(radio.CONFIG["stability_api"], ca_bundle=str(pem)), \
-                mock.patch.object(radio, "_ssl_context", return_value=ssl.create_default_context()), \
+                mock.patch.object(radio, "_download_context", return_value=ssl.create_default_context()), \
                 mock.patch.object(urllib.request.OpenerDirector, "open", side_effect=cert):
             self.assertNotIn("ca_bundle", self.fetch(("file", self.body)))
-            pem.write_text("not read: _ssl_context is patched", encoding="utf-8")
+            pem.write_text("not read: _download_context is patched", encoding="utf-8")
             self.assertTrue(self.fetch(("file", self.body)).endswith(
-                f", checked against stability_api.ca_bundle ({pem})"))
+                f", checked against your system's certificates and stability_api.ca_bundle ({pem})"))
 
     def test_a_file_already_there_is_not_downloaded_again(self):
         self.dest.parent.mkdir(parents=True)
@@ -234,6 +289,12 @@ class Unpack(unittest.TestCase):
         self.assertIsNone(radio._unpack(path, self.dest))
         self.assertEqual((self.dest / "llama-cli").read_bytes(), b"cli")
         self.assertIn("wasn't unpacked", radio._unpack(self.tar((".", "file", b"x")), self.dest))
+
+    def test_a_tar_keeps_the_folders_inside_its_top_folder(self):
+        path = self.tar(("llama-b1", "dir", None), ("llama-b1/llama-cli", "file", b"cli"),
+                        ("llama-b1/lib", "dir", None), ("llama-b1/lib/libggml.so", "file", b"lib"))
+        self.assertIsNone(radio._unpack(path, self.dest))
+        self.assertEqual((self.dest / "lib" / "libggml.so").read_bytes(), b"lib")
 
     def test_a_tar_loses_its_top_folder_and_keeps_links_beside_their_files(self):
         if not _symlinks_work():
@@ -329,6 +390,16 @@ class InstallRunner(unittest.TestCase):
         self.assertIn("Not installed: it needs about 2.0 GB free on the disk with", out)
         self.assertIn("which has 1 MB.", out)
 
+    def test_a_stopped_download_needs_room_only_for_the_rest(self):
+        # A full disk stopped it at 2.4 of 2.5 GB: the rerun must fit in what is still to come.
+        dest = radio.ROOT / "dl" / "big.bin"
+        dest.parent.mkdir(parents=True)
+        self.assertEqual(radio._still_to_fetch(dest, 1000), 1000)
+        radio._part(dest).write_bytes(b"x" * 900)
+        self.assertEqual(radio._still_to_fetch(dest, 1000), 100)
+        dest.write_bytes(b"y" * 1000)
+        self.assertEqual(radio._still_to_fetch(dest, 1000), 0)
+
     def test_a_plan_that_cant_run_says_why(self):
         self.assertEqual(self.install((None, "not possible here: no build.")), "Not installed: not possible here: no build.\n")
 
@@ -383,15 +454,25 @@ class Plans(SetupCase):
         self.assertEqual(steps, ["kokoro-v1.0.fp16.onnx (164 MB) from github.com", "voices-v1.0.bin (28 MB) from github.com",
                                  "a test line, rendered but not played"])
 
-    def test_the_test_line_makes_the_ready_python_the_djs(self):
-        # A cached Python that still exists outranks the one the plan found, so the check writes it first.
-        patch(self, "_voice_ready", return_value="C:/PyB/python.exe")
-        dj.KOKORO_PY_CACHE.write_text("C:/PyA-without-kokoro/python.exe", encoding="utf-8")
-        seen = []
-        with mock.patch.object(dj, "_kokoro_render",
-                               side_effect=lambda text: seen.append(dj.KOKORO_PY_CACHE.read_text(encoding="utf-8"))):
-            radio._voice_todo()[0][-1][2]()
-        self.assertEqual(seen, ["C:/PyB/python.exe"])
+    def test_a_voice_file_of_the_wrong_size_is_downloaded_again(self):
+        # A hand download that stopped is still a file; model-files-v1.0's model is another size, and fine.
+        patch(self, "_voice_ready", return_value="C:/Py312/python.exe")
+        voice = next(e for e in radio._setup_extras() if e.name == "voice")
+        fp16, voices = (dj.KOKORO_DIR / n for n in radio.KOKORO_PINS)
+        dj.KOKORO_DIR.mkdir(parents=True)
+        with mock.patch.dict(radio.KOKORO_PINS, {fp16.name: (30, "a" * 64), voices.name: (20, "b" * 64)}), \
+                mock.patch.dict(radio.KOKORO_V10_SIZES, {fp16.name: 40, voices.name: 20}):
+            fp16.write_bytes(b"m" * 40)                                # model-files-v1.0's size
+            voices.write_bytes(b"v" * 7)                               # stopped partway
+            self.assertEqual([what for what, _, _ in radio._voice_todo()[0]],
+                             ["voices-v1.0.bin (1 MB) from github.com, replacing the file there, which is the wrong size",
+                              "a test line, rendered but not played"])
+            self.assertFalse(voice.installed())
+            voices.write_bytes(b"v" * 20)
+            self.assertTrue(voice.installed())
+            (dj.KOKORO_DIR / "kokoro-v1.0.int8.onnx").write_bytes(b"i")
+            fp16.write_bytes(b"m" * 5)                                 # loaded first, so int8 can't stand in
+            self.assertEqual(radio._kokoro_missing(), [fp16.name])
 
     def test_a_pinned_dj_python_without_the_packages_stops_the_plan(self):
         pinned = radio.ROOT / "pinned-python.exe"
@@ -413,11 +494,18 @@ class Plans(SetupCase):
 
     def test_no_python_that_fits_gets_one_first_or_says_how(self):
         patch(self, "_voice_python", return_value=None)
+        patch(self, "_python_getter", return_value="C:/winget-or-brew")
         for platform, cmd in (("win32", "winget install Python.Python.3.13"), ("darwin", "brew install python@3.13")):
             with self.subTest(platform), on_os(platform):
                 steps, _ = radio._voice_todo()
                 self.assertEqual(steps[0][0], f"Python 3.13 for your user ({cmd})")
                 self.assertIs(steps[0][2], radio._get_python)
+        patch(self, "_python_getter", return_value=None)              # no winget, no Homebrew: not offered
+        for platform, tool in (("win32", "winget"), ("darwin", "Homebrew")):
+            with self.subTest(platform, getter=None), on_os(platform):
+                steps, why = radio._voice_todo()
+                self.assertIsNone(steps)
+                self.assertIn(f"and {tool}, which would install it, isn't on this computer. Install Python 3.13 from", why)
         with on_os("linux"):
             steps, why = radio._voice_todo()
         self.assertIsNone(steps)
@@ -447,9 +535,47 @@ class Plans(SetupCase):
 
     def test_the_enhancer_lists_only_whats_missing(self):
         patch(self, "_llm_paths", return_value=("llama-cli", None))
+        radio.LLM_DIR.mkdir(parents=True)
+        radio.LLM_ANSWERED.write_text(json.dumps(["llama-cli", "old.gguf"]), encoding="utf-8")   # it has answered
         steps = [what for what, _, _ in radio._enhancer_todo()[0]]
         self.assertEqual(len(steps), 2)
         self.assertTrue(steps[0].startswith("Qwen3-4B-Instruct-2507-Q4_K_M.gguf (2.5 GB"))
+
+    def test_a_llama_cli_that_never_answered_gets_the_tested_build(self):
+        # One on PATH may lack --single-turn, which every call passes: until one answers, offer b11669.
+        patch(self, "_llm_paths", return_value=("/usr/bin/llama-cli", str(radio.LLM_DIR / "m.gguf")))
+        with mock.patch.object(radio.sys, "platform", "linux"), mock.patch("platform.machine", return_value="x86_64"):
+            steps = [what for what, _, _ in radio._enhancer_todo()[0]]
+            self.assertTrue(steps[0].startswith(f"llama.cpp {radio.LLAMA_BUILD} "))
+            self.assertEqual(steps[1:], ["a test answer from the model"])
+        with mock.patch("platform.machine", return_value="riscv64"):     # no build to offer: test that one
+            self.assertEqual([what for what, _, _ in radio._enhancer_todo()[0]], ["a test answer from the model"])
+
+    def test_installed_means_this_llama_cli_and_model_have_answered(self):
+        # Files alone said installed: a test that timed out was then never run again.
+        pair = ("C:/llm/bin/llama-cli.exe", "C:/llm/m.gguf")
+        patch(self, "_llm_paths", return_value=pair)
+        patch(self, "_strip_cli_chrome", side_effect=lambda out, user: out)
+        radio.LLM_DIR.mkdir(parents=True)
+        with mock.patch.object(radio.subprocess, "run", return_value=mock.Mock(stdout="")):
+            self.assertEqual(radio._llm_check(), "the model gave no answer")
+        self.assertFalse(radio._enhancer_ready())
+        with mock.patch.object(radio.subprocess, "run", return_value=mock.Mock(stdout="Hello")):
+            self.assertIsNone(radio._llm_check())                        # any answer counts, enhance's too
+        self.assertTrue(radio._enhancer_ready())
+        patch(self, "_llm_paths", return_value=(pair[0], "C:/llm/other.gguf"))
+        self.assertFalse(radio._enhancer_ready())                        # another model: test it again
+
+    def test_the_plans_count_a_stopped_download_once(self):
+        os.environ["HF_TOKEN"] = "hf_secret_test_value"
+        radio.LLM_DIR.mkdir(parents=True)
+        size = radio.TOKENIZER_PIN[0]
+        radio._part(radio.TOKENIZER_FILE).write_bytes(b"x" * 1_000_000)
+        self.assertEqual(radio._tokenizer_todo()[0][0][1], size - 1_000_000)
+        with mock.patch.object(radio.shutil, "disk_usage", return_value=mock.Mock(free=size - 900_000)), \
+                mock.patch.object(radio, "_fetch", return_value="stopped here"):
+            out = run(radio.cmd_setup, ["tokenizer", "install"])[1]
+        self.assertIn("Not installed: stopped here.", out)               # it ran, not refused for room
 
     def test_no_hugging_face_login_means_no_plan_yet(self):
         out = run(radio._tokenizer_page, False)[1]
@@ -505,6 +631,17 @@ class HuggingFaceLogin(unittest.TestCase):
         file.write_bytes(b"\xff\xfe\x00\xd8")                  # half a UTF-16 surrogate pair
         self.assertIsNone(radio._hf_token())
 
+    def test_a_line_break_inside_the_token_is_dropped(self):
+        # urllib refuses a header holding one with the value in its message; huggingface_hub drops them.
+        file = self.tmp / "token"
+        os.environ["HF_TOKEN_PATH"] = str(file)
+        file.write_text("hf_abc\r\nhf_def\n", encoding="utf-8")
+        self.assertEqual(radio._hf_token(), "hf_abchf_def")
+        os.environ["HF_TOKEN"] = "hf_ghi\nhf_jkl"
+        self.assertEqual(radio._hf_token(), "hf_ghihf_jkl")
+        os.environ["HF_TOKEN"] = "\r\n"                         # nothing left: the file's is next
+        self.assertEqual(radio._hf_token(), "hf_abchf_def")
+
 
 class VoicePython(unittest.TestCase):
     def setUp(self):
@@ -555,6 +692,26 @@ class VoicePython(unittest.TestCase):
         self.assertEqual(dj.KOKORO_PY_CACHE.read_text(encoding="utf-8"), str(dj.venv_python()))
         patch(self, "_run", return_value=(1, "Collecting kokoro-onnx\nERROR: No matching distribution found\n"))
         self.assertEqual(radio._pip_voice(), "pip failed (ERROR: No matching distribution found)")
+
+    @unittest.skipUnless(os.name == "nt", "%LOCALAPPDATA% paths expand only on Windows")
+    def test_wingets_python_is_found_whatever_its_folder_suffix(self):
+        found = radio.ROOT / "Programs" / "Python" / "Python399-arm64" / "python.exe"
+        found.parent.mkdir(parents=True)
+        found.write_bytes(b"")
+        with mock.patch.dict(os.environ, LOCALAPPDATA=str(radio.ROOT)), on_os("win32"), \
+                mock.patch.object(dj, "PY_VOICE_MAX", (3, 99)), mock.patch.object(dj, "PY_VOICE_MIN", (3, 99)), \
+                mock.patch.object(dj, "_side_by_side", return_value=iter([])):
+            self.assertEqual(radio._voice_python(), str(found))
+
+    @unittest.skipUnless(os.name == "nt", "%LOCALAPPDATA% paths expand only on Windows")
+    def test_winget_is_found_where_claude_codes_shell_cant_see_it(self):
+        alias = radio.ROOT / "Microsoft" / "WindowsApps" / "winget.exe"
+        with mock.patch.dict(os.environ, LOCALAPPDATA=str(radio.ROOT)), on_os("win32"), \
+                mock.patch.object(radio.shutil, "which", return_value=None):
+            self.assertIsNone(radio._python_getter())
+            alias.parent.mkdir(parents=True)
+            alias.write_bytes(b"")
+            self.assertEqual(radio._python_getter(), str(alias))
 
     def test_an_environment_needs_venv(self):
         patch(self, "_voice_python", return_value="/usr/bin/python3")

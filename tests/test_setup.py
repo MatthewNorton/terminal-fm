@@ -169,11 +169,23 @@ class SetupExtras(SetupCase):
         self.assertNotIn("Qwen3", out)
 
     def test_installed_extras_say_so(self):
-        patch(self, "_llm_paths", return_value=("llama-cli", str(radio.LLM_DIR / "m.gguf")))
-        self.assertIn("Status: installed (m.gguf).", self.setup_out("enhancer"))
+        pair = ["llama-cli", str(radio.LLM_DIR / "m.gguf")]
+        patch(self, "_llm_paths", return_value=tuple(pair))
+        self.assertIn("Status: llama-cli and the model are here, but haven't given an answer yet.",
+                      self.setup_out("enhancer"))
         radio.LLM_DIR.mkdir(parents=True, exist_ok=True)
+        radio.LLM_ANSWERED.write_text(json.dumps(pair), encoding="utf-8")     # that pair answered once
+        self.assertIn("Status: installed (m.gguf).", self.setup_out("enhancer"))
         radio.TOKENIZER_FILE.write_text("{}", encoding="utf-8")
         self.assertIn("Status: installed.", self.setup_out("tokens"))
+
+    def test_the_statusline_install_is_claudes_edit_not_a_reason(self):
+        # The skill reads "Automatic install: <reason>" as an install that can't run here; the
+        # statusline's is Claude's own edit, which the skill offers, so its heading names that.
+        radio._install_statusline()
+        out = self.setup_out("statusline")
+        self.assertIn("\nAutomatic install (Claude edits settings.json): Claude adds the line below for you", out)
+        self.assertNotIn("Automatic install:", out)
 
     def test_unknown_page_prints_usage(self):
         self.assertTrue(self.setup_out("bogus").startswith("Usage: radio setup"))
@@ -205,7 +217,7 @@ class VoicePython(unittest.TestCase):
         with mock.patch.object(dj, "PY_VOICE_MAX", limit), on_os(platform), \
                 mock.patch.object(radio.shutil, "which", return_value=None), \
                 mock.patch.object(radio, "_voice_ready", return_value=None), \
-                mock.patch.object(dj, "kokoro_files_present", return_value=files):
+                mock.patch.object(radio, "_kokoro_missing", return_value=[] if files else list(radio.KOKORO_PINS)):
             return run(radio._voice_page, False)[1]
 
     def test_a_python_that_fits_gets_only_the_pip_step(self):
