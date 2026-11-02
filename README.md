@@ -130,7 +130,7 @@ The radio finds a Python that has these packages by itself, the voice's own envi
 
 The automatic install puts llama.cpp build b11669 for your system (its CPU build) in `~/.claude/terminal-fm/llm/bin/` and `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` in `~/.claude/terminal-fm/llm/`, then asks the model a test question. It needs about 2.6 GB free. The model alone is 2.5 GB, about 3 minutes at 100 Mbit/s and 33 at 10, so Claude runs the install in the background.
 
-`setup` counts the enhancer as installed once its `llama-cli` and model have given an answer, in that test or in `enhance`. Until then the install offers the test again, and when the only `llama-cli` is one on your PATH, it also offers build b11669, which the radio then uses first.
+`setup` counts the enhancer as installed once its `llama-cli` and model have given an answer, in that test or in `enhance`. Until then the install offers the test again. It also offers build b11669, which the radio then uses first, when the `llama-cli` it would use doesn't start (a copy without the files beside it) or its `--help` doesn't list `--single-turn`, in `llm/bin` or on your PATH. A `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` of another size than its download's, such as a download of your own that stopped, is downloaded again; another `.gguf` you chose is left alone.
 
 By hand:
 
@@ -145,7 +145,7 @@ It runs on the CPU and exits when it's done, so it doesn't use your GPU or keep 
 
 Google's tokenizer is gated: first accept Google's Gemma terms at <https://huggingface.co/google/t5gemma-b-b-ul2> with your Hugging Face account.
 
-The automatic install downloads its `tokenizer.json` (34 MB) with the Hugging Face login on your computer: the `HF_TOKEN` variable, or the token file `hf auth login` saves (`~/.cache/huggingface/token`). Without one, `/tfm setup tokenizer` says how to add it. The token is never printed, and Claude never asks for it.
+The automatic install downloads its `tokenizer.json` (34 MB) with the Hugging Face login on your computer: the `HF_TOKEN` variable, or the token file `hf auth login` saves (`~/.cache/huggingface/token`). Without one, `/tfm setup tokenizer` says how to add it. The token is never printed, and Claude never asks for it. `setup` counts the tokenizer as installed when its file is that download's size, or another file that loads; one that doesn't load, such as a download that stopped, is downloaded again.
 
 By hand:
 

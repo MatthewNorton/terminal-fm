@@ -177,7 +177,8 @@ class SetupExtras(SetupCase):
         radio.LLM_ANSWERED.write_text(json.dumps(pair), encoding="utf-8")     # that pair answered once
         self.assertIn("Status: installed (m.gguf).", self.setup_out("enhancer"))
         radio.TOKENIZER_FILE.write_text("{}", encoding="utf-8")
-        self.assertIn("Status: installed.", self.setup_out("tokens"))
+        with mock.patch.object(radio, "TOKENIZER_PIN", (2, "a" * 64)):        # the pinned download's size
+            self.assertIn("Status: installed.", self.setup_out("tokens"))
 
     def test_the_statusline_install_is_claudes_edit_not_a_reason(self):
         # The skill reads "Automatic install: <reason>" as an install that can't run here; the

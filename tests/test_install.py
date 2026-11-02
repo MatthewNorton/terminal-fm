@@ -541,15 +541,66 @@ class Plans(SetupCase):
         self.assertEqual(len(steps), 2)
         self.assertTrue(steps[0].startswith("Qwen3-4B-Instruct-2507-Q4_K_M.gguf (2.5 GB"))
 
-    def test_a_llama_cli_that_never_answered_gets_the_tested_build(self):
-        # One on PATH may lack --single-turn, which every call passes: until one answers, offer b11669.
-        patch(self, "_llm_paths", return_value=("/usr/bin/llama-cli", str(radio.LLM_DIR / "m.gguf")))
-        with mock.patch.object(radio.sys, "platform", "linux"), mock.patch("platform.machine", return_value="x86_64"):
+    def test_a_llama_cli_that_cant_answer_gets_the_tested_build(self):
+        # Every call passes --single-turn. A llama-cli that hasn't answered keeps its place only when
+        # its --help lists that; one that doesn't start (a copy without its DLLs) or lacks it gets b11669.
+        test_only = ["a test answer from the model"]
+        exe = "/usr/bin/llama-cli"                                       # where it is doesn't matter
+        patch(self, "_llm_paths", return_value=(exe, str(radio.LLM_DIR / "m.gguf")))
+        for help_run, wanted in (((0, "-st, --single-turn  run conversation for a single turn only"), False),
+                                 ((0, "-cnv, --conversation"), True),           # an older build
+                                 ((3221225781, ""), True),                      # STATUS_DLL_NOT_FOUND
+                                 ((None, "FileNotFoundError: gone"), True)):
+            with self.subTest(help=help_run), \
+                    mock.patch.object(radio, "_run", return_value=help_run) as ran, \
+                    mock.patch.object(radio.sys, "platform", "linux"), \
+                    mock.patch("platform.machine", return_value="x86_64"):
+                steps = [what for what, _, _ in radio._enhancer_todo()[0]]
+                self.assertEqual(steps[0].startswith(f"llama.cpp {radio.LLAMA_BUILD} "), wanted)
+                self.assertEqual(steps[-1:], test_only)
+        ran.assert_called_once_with([exe, "--help"], 60)
+        with mock.patch.object(radio, "_run", return_value=(1, "")), \
+                mock.patch("platform.machine", return_value="riscv64"):     # no build to offer: test that one
+            self.assertEqual([what for what, _, _ in radio._enhancer_todo()[0]], test_only)
+        radio.LLM_DIR.mkdir(parents=True, exist_ok=True)
+        radio.LLM_ANSWERED.write_text(json.dumps([exe, "old.gguf"]), encoding="utf-8")
+        with mock.patch.object(radio, "_run") as ran:                       # it has answered: not asked again
+            self.assertEqual([what for what, _, _ in radio._enhancer_todo()[0]], test_only)
+        ran.assert_not_called()
+
+    def test_a_pinned_model_of_the_wrong_size_is_downloaded_again(self):
+        # A hand download that stopped is still a .gguf, and was taken as the model forever.
+        gguf, own = radio.QWEN_FILE, radio.LLM_DIR / "my-own-model.gguf"
+        radio.LLM_DIR.mkdir(parents=True)
+        radio.LLM_ANSWERED.write_text(json.dumps(["llama-cli", "old.gguf"]), encoding="utf-8")
+        patch(self, "_llm_paths", return_value=("llama-cli", str(gguf)))
+        with mock.patch.object(radio, "QWEN_PIN", (30, "a" * 64)):
+            gguf.write_bytes(b"q" * 7)                                   # stopped partway
             steps = [what for what, _, _ in radio._enhancer_todo()[0]]
-            self.assertTrue(steps[0].startswith(f"llama.cpp {radio.LLAMA_BUILD} "))
-            self.assertEqual(steps[1:], ["a test answer from the model"])
-        with mock.patch("platform.machine", return_value="riscv64"):     # no build to offer: test that one
+            self.assertTrue(steps[0].endswith(", replacing the file there, which is the wrong size"), steps[0])
+            self.assertIn(f"Status: not installed ({gguf.name} is the wrong size", run(radio._enhancer_page, False)[1])
+            gguf.write_bytes(b"q" * 30)                                  # whole
             self.assertEqual([what for what, _, _ in radio._enhancer_todo()[0]], ["a test answer from the model"])
+            own.write_bytes(b"m" * 7)                                    # another .gguf is the user's call
+            patch(self, "_llm_paths", return_value=("llama-cli", str(own)))
+            self.assertEqual([what for what, _, _ in radio._enhancer_todo()[0]], ["a test answer from the model"])
+
+    def test_a_tokenizer_file_that_doesnt_load_isnt_installed(self):
+        # It counted as installed while gen silently estimated, and install said "Already installed".
+        os.environ["HF_TOKEN"] = "hf_secret_test_value"
+        tokenizer = next(e for e in radio._setup_extras() if e.name == "tokenizer")
+        radio.LLM_DIR.mkdir(parents=True)
+        radio.TOKENIZER_FILE.write_text('{"model": {"vocab": [["a", 0.0]', encoding="utf-8")   # stopped partway
+        self.assertFalse(tokenizer.installed())
+        self.assertEqual(radio.prompt_tokens("warm lo-fi")[1], False)
+        self.assertIn("Status: not installed (t5gemma-tokenizer.json is there but doesn't load",
+                      run(radio._tokenizer_page, False)[1])
+        self.assertTrue(radio._tokenizer_todo()[0][0][0].endswith(", replacing the file there, which doesn't load"))
+        with mock.patch.object(radio, "TOKENIZER_PIN", (radio.TOKENIZER_FILE.stat().st_size, "a" * 64)):
+            self.assertTrue(tokenizer.installed())                       # the pinned size: taken as whole, no load
+        radio._TOKENIZER = None
+        radio.TOKENIZER_FILE.write_text(json.dumps({"model": {"vocab": {"a": 0}, "merges": []}}), encoding="utf-8")
+        self.assertTrue(tokenizer.installed())                           # another size that loads
 
     def test_installed_means_this_llama_cli_and_model_have_answered(self):
         # Files alone said installed: a test that timed out was then never run again.

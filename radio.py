@@ -1993,6 +1993,7 @@ _MACHINES = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "aarch64": "arm6
 QWEN_PAGE = "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF"
 QWEN_URL = QWEN_PAGE + "/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
 QWEN_PIN = (2_497_281_120, "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597")
+QWEN_FILE = LLM_DIR / QWEN_URL.rsplit("/", 1)[1]
 TOKENIZER_PAGE = "https://huggingface.co/google/t5gemma-b-b-ul2"
 TOKENIZER_URL = TOKENIZER_PAGE + "/resolve/97ea9b7e92738bb57437867277ae38e65345b8d7/tokenizer.json"
 TOKENIZER_PIN = (34_362_429, "7794135caa3ea73918949c902a781cc61dab674a4b59c17d85931c77c1114cbd")
@@ -2063,18 +2064,26 @@ def _part(dest):
     return dest.with_name(dest.name + ".part")
 
 
+def _whole(path, *sizes):
+    """`path` is a file of one of `sizes` bytes: a download there didn't stop partway."""
+    return path.is_file() and path.stat().st_size in sizes
+
+
 def _still_to_fetch(dest, size):
     """The bytes a download of `dest` still needs: none when the file is already there whole, else
     its size less what a stopped download left in its .part. The plans count this, so a download a
     full disk stopped fits again once the rest of it is free."""
-    if dest.is_file() and dest.stat().st_size == size:
+    if _whole(dest, size):
         return 0
     part = _part(dest)
     return max(0, size - (part.stat().st_size if part.is_file() else 0))
 
 
-def _fetch_step(what, url, dest, size, sha256, **kw):
-    """A plan's download step: what it says, the bytes still to come and the _fetch that gets them."""
+def _fetch_step(what, url, dest, size, sha256, replacing="is the wrong size", **kw):
+    """A plan's download step: what it says (naming a file at `dest` it replaces, and why), the
+    bytes still to come and the _fetch that gets them."""
+    if dest.is_file() and not _whole(dest, size):
+        what += f", replacing the file there, which {replacing}"
     return what, _still_to_fetch(dest, size), functools.partial(_fetch, url, dest, size, sha256, **kw)
 
 
@@ -2086,7 +2095,7 @@ def _fetch(url, dest, size, sha256, token=None, refused=""):
     once, so a 2.5 GB file isn't read again to check it. `token` goes to `url`'s own host only, never
     to a host it redirects to: GitHub and Hugging Face both hand the file over from a CDN, which
     needs no login. `refused` follows the message for a 401 or 403 from `url`'s own host."""
-    if dest.is_file() and dest.stat().st_size == size and _sha256(dest) == sha256:
+    if _whole(dest, size) and _sha256(dest) == sha256:
         return None
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = _part(dest)
@@ -2443,11 +2452,8 @@ def _voice_todo():
                   ("kokoro-onnx and soundfile from PyPI, into that environment", VOICE_ENV_BYTES, _pip_voice)]
     for name in _kokoro_missing():
         size, sha = KOKORO_PINS[name]
-        dest = dj.KOKORO_DIR / name
-        what = f"{name} ({_size(size)}) from github.com"
-        if dest.is_file():
-            what += ", replacing the file there, which is the wrong size"
-        steps.append(_fetch_step(what, KOKORO_URL + name, dest, size, sha))
+        steps.append(_fetch_step(f"{name} ({_size(size)}) from github.com", KOKORO_URL + name,
+                                 dj.KOKORO_DIR / name, size, sha))
     steps.append(("a test line, rendered but not played", 0, _voice_check))
     return steps, None
 
@@ -2457,13 +2463,10 @@ def _kokoro_missing():
     of its download or of model-files-v1.0's, so a hand download that stopped is replaced. Another of
     the three models will do while no fp16 model is there, since kokoro_tts.py loads that one first."""
     import dj
-
-    def whole(name):
-        p = dj.KOKORO_DIR / name
-        return p.is_file() and p.stat().st_size in (KOKORO_PINS[name][0], KOKORO_V10_SIZES[name])
     fp16 = dj.KOKORO_MODELS[0]
     another = not (dj.KOKORO_DIR / fp16).exists() and any((dj.KOKORO_DIR / m).exists() for m in dj.KOKORO_MODELS[1:])
-    return [n for n in KOKORO_PINS if not whole(n) and not (n == fp16 and another)]
+    return [n for n in KOKORO_PINS if not _whole(dj.KOKORO_DIR / n, KOKORO_PINS[n][0], KOKORO_V10_SIZES[n])
+            and not (n == fp16 and another)]
 
 
 def _voice_pip_steps():
@@ -2547,11 +2550,26 @@ def _llm_check():
     return None if _llm_run("Answer in one word.", "Say hello.", 0, 8, timeout=300) else "the model gave no answer"
 
 
+def _takes_single_turn(exe):
+    """llama-cli `exe` starts and lists --single-turn, which _llm_run passes. A copy without the
+    files beside it doesn't start; an older build lacks the option."""
+    code, out = _run([exe, "--help"], 60)
+    return code == 0 and "--single-turn" in out
+
+
 def _llama_wanted(exe):
-    """llama.cpp's pinned build belongs in llm/bin: none is there, and no llama-cli has answered (one
-    on PATH may lack --single-turn, which _llm_run passes)."""
+    """llama.cpp's pinned build belongs in llm/bin: no llama-cli is here, or the one here hasn't
+    answered and can't (see _takes_single_turn), in llm/bin or on PATH alike."""
+    if not exe:
+        return True
     answered = _llm_answered()
-    return not _llm_exe().exists() and not (exe and answered and answered[0] == exe)
+    return not (answered and answered[0] == exe) and not _takes_single_turn(exe)
+
+
+def _qwen_wanted(model):
+    """The pinned model belongs in llm/: no .gguf is there, or the pinned one is there at another size
+    than its download's (a download of your own that stopped). Another .gguf is yours to judge."""
+    return not model or (Path(model) == QWEN_FILE and not _whole(QWEN_FILE, QWEN_PIN[0]))
 
 
 def _enhancer_todo():
@@ -2567,12 +2585,11 @@ def _enhancer_todo():
     elif not exe:
         return None, (f"not possible here: llama.cpp publishes no CPU build for {sys.platform}"
                       f" on {platform.machine()}.")
-    if not model:
+    if _qwen_wanted(model):
         size, sha = QWEN_PIN
-        gguf = LLM_DIR / QWEN_URL.rsplit("/", 1)[1]
         minutes = [round(size * 8 / (mbit * 1e6) / 60) for mbit in (100, 10)]
-        steps.append(_fetch_step(f"{gguf.name} ({_size(size)}: about {minutes[0]} minutes at 100 Mbit/s,"
-                                 f" {minutes[1]} at 10) from huggingface.co, into {LLM_DIR}", QWEN_URL, gguf, size, sha))
+        steps.append(_fetch_step(f"{QWEN_FILE.name} ({_size(size)}: about {minutes[0]} minutes at 100 Mbit/s,"
+                                 f" {minutes[1]} at 10) from huggingface.co, into {LLM_DIR}", QWEN_URL, QWEN_FILE, size, sha))
     steps.append(("a test answer from the model", 0, _llm_check))
     return steps, None
 
@@ -2585,11 +2602,16 @@ def _enhancer_page(done):
         print(f"Status: installed ({Path(model).name}).")
         return
     missing = " and ".join(n for n, have in (("the model", model), ("llama-cli", exe)) if not have)
-    print(f"Status: not installed (missing {missing})." if missing
-          else "Status: llama-cli and the model are here, but haven't given an answer yet.")
+    qwen = _qwen_wanted(model)
+    if missing:
+        print(f"Status: not installed (missing {missing}).")
+    elif qwen:
+        print(f"Status: not installed ({Path(model).name} is the wrong size: a download that stopped?).")
+    else:
+        print("Status: llama-cli and the model are here, but haven't given an answer yet.")
     _auto_block("enhancer", _enhancer_todo())
     steps = []
-    if not model:
+    if qwen:
         steps += [("Download the Q4_K_M file of Qwen3-4B-Instruct-2507 (about 2.5 GB) from:", QWEN_PAGE),
                   ("Put it in this folder (keep only one .gguf there):", str(LLM_DIR))]
     if _llama_wanted(exe):
@@ -2625,6 +2647,12 @@ def _hf_token():
     return clean(text)
 
 
+def _tokenizer_ready():
+    """The tokenizer file is whole: the pinned download's size (no load needed), or another that
+    loads. A download that stopped is neither, so `setup tokenizer install` replaces it."""
+    return _whole(TOKENIZER_FILE, TOKENIZER_PIN[0]) or bool(_tokenizer())
+
+
 def _tokenizer_check():
     global _TOKENIZER
     _TOKENIZER = None                                 # load the new file
@@ -2645,7 +2673,7 @@ def _tokenizer_todo():
     refused = (f"Accept Google's Gemma terms at {TOKENIZER_PAGE} with the account you're logged in as,"
                " check that the login is current, then run this again")
     return [_fetch_step(f"tokenizer.json ({_size(size)}) from huggingface.co with your login, saved as {TOKENIZER_FILE}",
-                        TOKENIZER_URL, TOKENIZER_FILE, size, sha, token=token, refused=refused),
+                        TOKENIZER_URL, TOKENIZER_FILE, size, sha, replacing="doesn't load", token=token, refused=refused),
             ("a test count", 0, _tokenizer_check)], None
 
 
@@ -2656,7 +2684,8 @@ def _tokenizer_page(done):
     if done:
         print("Status: installed.")
         return
-    print("Status: not installed (estimating).")
+    print(f"Status: not installed ({TOKENIZER_FILE.name} is there but doesn't load, so gen estimates)."
+          if TOKENIZER_FILE.is_file() else "Status: not installed (estimating).")
     _auto_block("tokenizer", _tokenizer_todo())
     print("\nOr by hand:\n" + _steps([("Sign in to Hugging Face and accept Google's Gemma terms at:", TOKENIZER_PAGE),
                                       "Download tokenizer.json from its \"Files and versions\" tab.",
@@ -2682,7 +2711,7 @@ def _setup_extras():
                   _enhancer_ready, _enhancer_page, _enhancer_todo,
                   'try /tfm enhance "lofi coffee music".'),
             Extra("tokenizer", "an exact prompt-length check instead of an estimate",
-                  TOKENIZER_FILE.is_file, _tokenizer_page, _tokenizer_todo,
+                  _tokenizer_ready, _tokenizer_page, _tokenizer_todo,
                   "gen, enhance and egen count prompt tokens exactly now.")]
 
 
