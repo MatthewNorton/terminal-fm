@@ -2321,8 +2321,8 @@ KOKORO_ONNX_MIN = tuple(int(n) for n in KOKORO_ONNX_NEED.split()[1].split("."))
 @functools.cache
 def _voice_ready():
     """The Python the DJ would render the voice with (dj.py's own search, caching nothing), when it
-    has kokoro-onnx KOKORO_ONNX_MIN or newer; else None. Asked once per command: the extras list,
-    the voice page and the install's plan all need it, and it starts a Python or more each time."""
+    has kokoro-onnx KOKORO_ONNX_MIN or newer; else None. Asked once per command: the voice page and the
+    install's plan both need it, and it starts a Python or more each time."""
     import dj
     py = dj._kokoro_python(dj.dj_config(), check=True)
     if not py:
@@ -2469,6 +2469,14 @@ def _kokoro_missing():
             and not (n == fp16 and another)]
 
 
+def _voice_installed():
+    """The voice files are whole and the interpreter the DJ tries first has spoken a Kokoro line
+    (dj.rendered_with): file reads only. Probing for a Python with kokoro-onnx took about 1 s on
+    every plain `setup`; the page and the plan still probe when it isn't installed."""
+    import dj
+    return not _kokoro_missing() and bool(dj.rendered_with())
+
+
 def _voice_pip_steps():
     """The steps by hand that give a Python the voice's packages."""
     import dj
@@ -2494,8 +2502,13 @@ def _voice_page(done):
         print("Status: installed.")
         return
     files = not _kokoro_missing()
-    print(f"Status: the model files are here, but no Python has {KOKORO_ONNX_NEED} and soundfile."
-          if files else "Status: not installed.")
+    if not files:
+        print("Status: not installed.")
+    elif _voice_ready():
+        print(f"Status: the model files and a Python with {KOKORO_ONNX_NEED} are here, but the voice hasn't"
+              " spoken a line with them yet.")
+    else:
+        print(f"Status: the model files are here, but no Python has {KOKORO_ONNX_NEED} and soundfile.")
     _auto_block("voice", _voice_todo())
     steps = [] if files else [(f"Download {dj.KOKORO_MODELS[0]} and {dj.KOKORO_VOICES} from:",
                                KOKORO_URL.replace("/download/", "/tag/").rstrip("/")),
@@ -2546,13 +2559,21 @@ def _get_llama(name, size, sha256):
 
 
 def _llm_check():
-    """A test answer; _llm_run records the pair that gave it, which is what `installed` reads."""
-    return None if _llm_run("Answer in one word.", "Say hello.", 0, 8, timeout=300) else "the model gave no answer"
+    """A test answer; _llm_run records the pair that gave it, which is what `installed` reads. A
+    .gguf of the user's own isn't size-checked, so a failure names it in case it stopped partway."""
+    if _llm_run("Answer in one word.", "Say hello.", 0, 8, timeout=300):
+        return None
+    why, model = "the model gave no answer", _llm_paths()[1]
+    if model and Path(model) != QWEN_FILE:
+        why += f". If {Path(model).name} is a download that stopped, delete it and run this again for the tested model"
+    return why
 
 
+@functools.cache
 def _takes_single_turn(exe):
     """llama-cli `exe` starts and lists --single-turn, which _llm_run passes. A copy without the
-    files beside it doesn't start; an older build lacks the option."""
+    files beside it doesn't start; an older build lacks the option. Asked once a command: the
+    enhancer's page and its plan both need it."""
     code, out = _run([exe, "--help"], 60)
     return code == 0 and "--single-turn" in out
 
@@ -2705,7 +2726,7 @@ def _setup_extras():
                   lambda: (None, "Claude adds the statusline's line to settings.json itself, so that Claude Code"
                                  " asks you first. /tfm setup statusline shows the line."), ""),
             Extra("voice", "a natural DJ voice (Kokoro) instead of the system voice",
-                  lambda: not _kokoro_missing() and bool(_voice_ready()), _voice_page, _voice_todo,
+                  _voice_installed, _voice_page, _voice_todo,
                   "the DJ speaks with Kokoro from its next line."),
             Extra("enhancer", "turns a rough idea into a full prompt (enhance, egen)",
                   _enhancer_ready, _enhancer_page, _enhancer_todo,

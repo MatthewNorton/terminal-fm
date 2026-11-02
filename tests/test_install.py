@@ -467,6 +467,10 @@ class Plans(SetupCase):
             self.assertEqual([what for what, _, _ in radio._voice_todo()[0]],
                              ["voices-v1.0.bin (1 MB) from github.com, replacing the file there, which is the wrong size",
                               "a test line, rendered but not played"])
+            py = radio.ROOT / "py.exe"                                 # the DJ's interpreter has spoken a line
+            py.write_bytes(b"")
+            for f in (dj.KOKORO_PY_CACHE, dj.KOKORO_RENDERED):
+                f.write_text(str(py), encoding="utf-8")
             self.assertFalse(voice.installed())
             voices.write_bytes(b"v" * 20)
             self.assertTrue(voice.installed())
@@ -551,6 +555,7 @@ class Plans(SetupCase):
                                  ((0, "-cnv, --conversation"), True),           # an older build
                                  ((3221225781, ""), True),                      # STATUS_DLL_NOT_FOUND
                                  ((None, "FileNotFoundError: gone"), True)):
+            radio._takes_single_turn.cache_clear()                      # asked once a command
             with self.subTest(help=help_run), \
                     mock.patch.object(radio, "_run", return_value=help_run) as ran, \
                     mock.patch.object(radio.sys, "platform", "linux"), \
@@ -558,7 +563,9 @@ class Plans(SetupCase):
                 steps = [what for what, _, _ in radio._enhancer_todo()[0]]
                 self.assertEqual(steps[0].startswith(f"llama.cpp {radio.LLAMA_BUILD} "), wanted)
                 self.assertEqual(steps[-1:], test_only)
+                run(radio._enhancer_page, False)                         # the page asks too: still one run
         ran.assert_called_once_with([exe, "--help"], 60)
+        radio._takes_single_turn.cache_clear()
         with mock.patch.object(radio, "_run", return_value=(1, "")), \
                 mock.patch("platform.machine", return_value="riscv64"):     # no build to offer: test that one
             self.assertEqual([what for what, _, _ in radio._enhancer_todo()[0]], test_only)
@@ -602,6 +609,26 @@ class Plans(SetupCase):
         radio.TOKENIZER_FILE.write_text(json.dumps({"model": {"vocab": {"a": 0}, "merges": []}}), encoding="utf-8")
         self.assertTrue(tokenizer.installed())                           # another size that loads
 
+    def test_plain_setup_lists_the_voice_without_starting_a_python(self):
+        # It probed for a Python with kokoro-onnx, about 1 s on every `setup`; now it reads what the
+        # DJ recorded when a Kokoro line last worked, and the page probes only when that's missing.
+        voice = next(e for e in radio._setup_extras() if e.name == "voice")
+        dj.KOKORO_DIR.mkdir(parents=True)
+        for name, (size, _) in radio.KOKORO_PINS.items():
+            with open(dj.KOKORO_DIR / name, "wb") as f:
+                f.truncate(size)                                         # whole, sparse where it can be
+        py = radio.ROOT / "py.exe"
+        py.write_bytes(b"")
+        dj.KOKORO_PY_CACHE.write_text(str(py), encoding="utf-8")
+        with mock.patch.object(radio.subprocess, "run", side_effect=AssertionError("started a program")):  # dj's too
+            self.assertFalse(voice.installed())                          # no line spoken yet
+            dj.KOKORO_RENDERED.write_text(str(py), encoding="utf-8")
+            self.assertTrue(voice.installed())
+            dj.KOKORO_PY_CACHE.write_text(str(radio.ROOT / "other.exe"), encoding="utf-8")
+            self.assertFalse(voice.installed())                          # the DJ now tries another first
+        patch(self, "_voice_ready", return_value=str(py))
+        self.assertIn("are here, but the voice hasn't spoken a line with them yet", run(radio._voice_page, False)[1])
+
     def test_installed_means_this_llama_cli_and_model_have_answered(self):
         # Files alone said installed: a test that timed out was then never run again.
         pair = ("C:/llm/bin/llama-cli.exe", "C:/llm/m.gguf")
@@ -609,7 +636,11 @@ class Plans(SetupCase):
         patch(self, "_strip_cli_chrome", side_effect=lambda out, user: out)
         radio.LLM_DIR.mkdir(parents=True)
         with mock.patch.object(radio.subprocess, "run", return_value=mock.Mock(stdout="")):
-            self.assertEqual(radio._llm_check(), "the model gave no answer")
+            # The user's own .gguf isn't size-checked, so the failure names it.
+            self.assertEqual(radio._llm_check(), "the model gave no answer. If m.gguf is a download that stopped,"
+                                                 " delete it and run this again for the tested model")
+            with mock.patch.object(radio, "_llm_paths", return_value=(pair[0], str(radio.QWEN_FILE))):
+                self.assertEqual(radio._llm_check(), "the model gave no answer")    # the tested one is
         self.assertFalse(radio._enhancer_ready())
         with mock.patch.object(radio.subprocess, "run", return_value=mock.Mock(stdout="Hello")):
             self.assertIsNone(radio._llm_check())                        # any answer counts, enhance's too

@@ -32,6 +32,7 @@ KOKORO_VENV = KOKORO_DIR / "venv"                         # the voice's own Pyth
 TMP_WAV = ROOT / "_dj.wav"                                # shared scratch (Piper only)
 ENGINE_LOG = ROOT / "dj_engine.log"                       # one line per utterance: engine + why
 KOKORO_PY_CACHE = ROOT / ".kokoro_python"                 # cached interpreter that has kokoro_onnx
+KOKORO_RENDERED = KOKORO_DIR / ".rendered"                # the interpreter of the last Kokoro line that worked
 IS_WIN = os.name == "nt"
 DEVNULL = subprocess.DEVNULL
 CREATE_NO_WINDOW = 0x08000000 if IS_WIN else 0            # hide child console windows on Windows
@@ -127,10 +128,11 @@ def last_line(text):
     return lines[-1][:200] if lines else "no output"
 
 
-def _cached_python():
-    """The interpreter .kokoro_python names, when the file and that interpreter exist; else None."""
+def _cached_python(path=KOKORO_PY_CACHE):
+    """The interpreter `path` names (.kokoro_python, or KOKORO_RENDERED), when the file and that
+    interpreter exist; else None."""
     try:
-        cached = KOKORO_PY_CACHE.read_text(encoding="utf-8").strip()
+        cached = path.read_text(encoding="utf-8").strip()
     except Exception:
         return None
     return cached if cached and Path(cached).exists() else None
@@ -278,6 +280,7 @@ def _kokoro_render(text):
     cfg = dj_config()
     py = _kokoro_python(cfg)
     if not py:
+        _note_rendered(None)
         _kokoro_log("kokoro-fail", "no interpreter has kokoro_onnx installed", text)
         return None
     _cleanup_tmp()
@@ -290,10 +293,30 @@ def _kokoro_render(text):
             pass
         found = _kokoro_python(cfg)                    # and search again, for this very line
         if found and found != py:
-            out = _render_with(found, script, voice, text)
+            py, out = found, _render_with(found, script, voice, text)
+    _note_rendered(py if out else None)
     if out:
         _kokoro_last = ""
     return out
+
+
+def _note_rendered(py):
+    """Record the interpreter a Kokoro line just rendered with (KOKORO_RENDERED), or forget it after
+    a line failed, so rendered_with() answers `radio setup` without starting a Python."""
+    try:
+        if py is None:
+            KOKORO_RENDERED.unlink(missing_ok=True)
+        elif _cached_python(KOKORO_RENDERED) != py:
+            KOKORO_RENDERED.write_text(py, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def rendered_with():
+    """The interpreter the last Kokoro line rendered with, while it is still the one the DJ tries
+    first (dj.python, else the cached .kokoro_python); else None. File reads only."""
+    py = _cached_python(KOKORO_RENDERED)
+    return py if py == (pinned_python(dj_config()) or _cached_python()) else None
 
 
 def _kokoro_why():

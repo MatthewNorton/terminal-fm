@@ -33,11 +33,13 @@ __pycache__/
 #    (.gitkeep) so the code finds them where it expects. `radio setup <extra> install`
 #    also leaves the voice's own Python environment, downloads in progress (.part),
 #    llama.cpp's archive when its install stopped, and its unpacking folder (bin-*);
-#    llm/.answered records which llama-cli and model last answered.
+#    llm/.answered records which llama-cli and model last answered, kokoro/.rendered
+#    which Python last spoke a Kokoro line.
 kokoro/*.onnx
 kokoro/*.bin
 kokoro/*.part
 kokoro/venv/
+kokoro/.rendered
 llm/*.gguf
 llm/*.part
 llm/.answered

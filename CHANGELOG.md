@@ -13,7 +13,7 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 - New tracks are named after up to 60 characters of their prompt, cut at a whole word with single dashes, instead of 30 characters cut mid-word (`a-driving--upbeat-lofi-synthwa`). Tracks made before keep their names.
 - `setup tokens` is now `setup tokenizer`. The old name still works.
-- `setup` counts the DJ voice as installed only when a Python with kokoro-onnx 0.6 or newer can run it, not when the model files are there: kokoro-onnx 0.5.0 can't run the current model.
+- `setup` counts the DJ voice as installed once the Python the DJ uses has spoken a Kokoro line with whole model files, not when the model files are there: kokoro-onnx 0.5.0, for one, can't run the current model. It reads what the DJ recorded, so `setup` starts no Python for it.
 - `setup` counts the prompt enhancer as installed once its `llama-cli` and model have given an answer, not when the files are there. Its automatic install offers llama.cpp b11669 only when the `llama-cli` it would use doesn't start or has no `--single-turn`, and downloads the model again when a file of its name is the wrong size.
 - `setup` counts the exact tokenizer as installed when its file is the tested download's size or loads, not when any file is there; one that doesn't load is downloaded again.
 - The DJ looks for the voice's packages in the voice's own environment first. When its cached Python fails a line, it searches again and speaks that line with any other Python it finds.

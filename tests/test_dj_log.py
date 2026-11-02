@@ -128,6 +128,16 @@ class StaleCache(unittest.TestCase):
         self.assertEqual(self.renders, [str(self.stale)])
         self.assertFalse(dj.KOKORO_PY_CACHE.exists())                   # the next line searches again
 
+    def test_a_line_that_worked_records_its_python_and_a_failure_forgets_it(self):
+        # `radio setup` reads this record instead of starting a Python to look for one.
+        self.assertIsNotNone(dj._kokoro_render("hello"))
+        self.assertEqual(dj.KOKORO_RENDERED.read_text(encoding="utf-8"), str(self.venv))
+        self.assertEqual(dj.rendered_with(), str(self.venv))            # the cache names it as well
+        self.broken = True
+        self.assertIsNone(dj._kokoro_render("hello"))
+        self.assertFalse(dj.KOKORO_RENDERED.exists())
+        self.assertIsNone(dj.rendered_with())
+
 
 class SideBySidePython(unittest.TestCase):
     """A Python 3.13 installed beside a newer default is found without dj.python: after the usual

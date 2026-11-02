@@ -55,6 +55,7 @@ def reset_home():
     radio.OUTDIR.mkdir(parents=True, exist_ok=True)
     radio._TOKENIZER = None
     radio._voice_ready.cache_clear()
+    radio._takes_single_turn.cache_clear()
 
 
 def patch(case, name, **kwargs):

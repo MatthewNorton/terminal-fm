@@ -115,6 +115,8 @@ The automatic install:
 2. Downloads `kokoro-v1.0.fp16.onnx` (164 MB) and `voices-v1.0.bin` (28 MB) into `~/.claude/terminal-fm/kokoro/`. A file already there is kept when it's the size of this download or of the older model-files-v1.0 release's; any other size, such as a download of your own that stopped, is downloaded again.
 3. Renders a test line without playing it.
 
+`setup` counts the voice as installed once the model files are whole and the Python the DJ uses has spoken a Kokoro line with them, in that test or on air; a line that fails clears it. So `setup` checks the voice without starting a Python.
+
 Claude runs it in the background, because on a slow connection it can take longer than the 10 minutes Claude Code allows a command.
 
 By hand:
@@ -401,7 +403,7 @@ The radio's network requests go to the Stability AI API (the three URLs in `conf
 <details>
 <summary>The radio's own bookkeeping files</summary>
 
-`state.json`, `nowplaying.txt`, `queue/`, `playlist.json`, `resume.json`, `breaking.txt`, `last_list.json`, `last_archive.json`, `dj_speaking.lock`, `.hook_seen`, `.kokoro_python`, `llm/.answered` (the `llama-cli` and model that last answered), and the voice renders `_dj.wav` and `_dj_<pid>.wav`.
+`state.json`, `nowplaying.txt`, `queue/`, `playlist.json`, `resume.json`, `breaking.txt`, `last_list.json`, `last_archive.json`, `dj_speaking.lock`, `.hook_seen`, `.kokoro_python`, `llm/.answered` (the `llama-cli` and model that last answered), `kokoro/.rendered` (the Python that last spoke a Kokoro line), and the voice renders `_dj.wav` and `_dj_<pid>.wav`.
 
 </details>
 
