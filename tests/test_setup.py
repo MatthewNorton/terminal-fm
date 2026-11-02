@@ -3,7 +3,6 @@ the hook launcher's note when no Python is found, and the statusline: the Sessio
 statusline.py and the `>` that marks a playing track."""
 
 import ast
-import contextlib
 import json
 import os
 import re
@@ -16,43 +15,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import REPO, own_line, patch, radio, reset_home, run
+from radio_test_support import OSES, REPO, SetupCase, on_os, own_line, patch, radio, reset_home, run
 
 import dj  # noqa: E402  (after radio_test_support, which points TERMINAL_FM_HOME at the test home)
 
 HOOK = REPO / "hooks" / "radio-hook.sh"
-OSES = ("win32", "darwin", "linux")
-
-
-@contextlib.contextmanager
-def on_os(platform):
-    """radio as it runs on `platform`, one of OSES: IS_WIN and sys.platform to match."""
-    with mock.patch.object(radio, "IS_WIN", platform == "win32"), \
-            mock.patch.object(radio.sys, "platform", platform):
-        yield
-
-
-class SetupCase(unittest.TestCase):
-    def setUp(self):
-        reset_home()
-        env = mock.patch.dict(os.environ)
-        env.start()
-        self.addCleanup(env.stop)
-        os.environ.pop("STABILITY_API_KEY", None)
-        cfg = tempfile.mkdtemp(prefix="terminal-fm-cfg-")
-        self.addCleanup(shutil.rmtree, cfg, True)
-        os.environ["CLAUDE_CONFIG_DIR"] = cfg          # never read the real ~/.claude/settings.json
-        self.cfg = Path(cfg)
-        patch(self, "_llm_paths", return_value=(None, None))
-
-    def ready(self):
-        patch(self, "detect_player", return_value=("/usr/bin/ffplay", None))
-        radio.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
-        (radio.OUTDIR / "a.mp3").write_bytes(b"ID3")
-        radio.HOOK_SEEN.write_text("2026-10-17 09:00", encoding="utf-8")
-
-    def setup_out(self, *args):
-        return run(radio.cmd_setup, list(args))[1]
 
 
 class Setup(SetupCase):
@@ -187,12 +154,13 @@ class SetupExtras(SetupCase):
 
     def test_pages_name_this_installs_paths(self):
         for name, path in (("voice", radio.ROOT / "kokoro"), ("enhancer", radio.LLM_DIR),
-                           ("tokens", radio.TOKENIZER_FILE)):
+                           ("tokenizer", radio.TOKENIZER_FILE)):
             with self.subTest(name):
                 out = self.setup_out(name)
                 self.assertIn("Status: not installed", out)
                 self.assertIn(own_line(str(path)), out.splitlines())
                 self.assertIn(f"Run /tfm setup {name} again to check.", out)
+        self.assertEqual(self.setup_out("tokens"), self.setup_out("tokenizer"))   # the old name
 
     def test_enhancer_lists_only_what_is_missing(self):
         patch(self, "_llm_paths", return_value=(None, str(radio.LLM_DIR / "m.gguf")))
@@ -201,11 +169,24 @@ class SetupExtras(SetupCase):
         self.assertNotIn("Qwen3", out)
 
     def test_installed_extras_say_so(self):
-        patch(self, "_llm_paths", return_value=("llama-cli", str(radio.LLM_DIR / "m.gguf")))
-        self.assertIn("Status: installed (m.gguf).", self.setup_out("enhancer"))
+        pair = ["llama-cli", str(radio.LLM_DIR / "m.gguf")]
+        patch(self, "_llm_paths", return_value=tuple(pair))
+        self.assertIn("Status: llama-cli and the model are here, but haven't given an answer yet.",
+                      self.setup_out("enhancer"))
         radio.LLM_DIR.mkdir(parents=True, exist_ok=True)
+        radio.LLM_ANSWERED.write_text(json.dumps(pair), encoding="utf-8")     # that pair answered once
+        self.assertIn("Status: installed (m.gguf).", self.setup_out("enhancer"))
         radio.TOKENIZER_FILE.write_text("{}", encoding="utf-8")
-        self.assertIn("Status: installed.", self.setup_out("tokens"))
+        with mock.patch.object(radio, "TOKENIZER_PIN", (2, "a" * 64)):        # the pinned download's size
+            self.assertIn("Status: installed.", self.setup_out("tokens"))
+
+    def test_the_statusline_install_is_claudes_edit_not_a_reason(self):
+        # The skill reads "Automatic install: <reason>" as an install that can't run here; the
+        # statusline's is Claude's own edit, which the skill offers, so its heading names that.
+        radio._install_statusline()
+        out = self.setup_out("statusline")
+        self.assertIn("\nAutomatic install (Claude edits settings.json): Claude adds the line below for you", out)
+        self.assertNotIn("Automatic install:", out)
 
     def test_unknown_page_prints_usage(self):
         self.assertTrue(self.setup_out("bogus").startswith("Usage: radio setup"))
@@ -232,35 +213,38 @@ class VoicePython(unittest.TestCase):
     PIP = 'pip install -U "kokoro-onnx>=0.6" soundfile'
     AGAIN = "Run /tfm setup voice again to check."
 
-    def page(self, done, limit, platform=sys.platform):
+    def page(self, limit, platform=sys.platform, files=False):
+        """The voice page with no Python that has the packages, and the model files there or not."""
         with mock.patch.object(dj, "PY_VOICE_MAX", limit), on_os(platform), \
-                mock.patch.object(radio.shutil, "which", return_value=None):     # no PATH scan for espeak
-            return run(radio._voice_page, done)[1]
+                mock.patch.object(radio.shutil, "which", return_value=None), \
+                mock.patch.object(radio, "_voice_ready", return_value=None), \
+                mock.patch.object(radio, "_kokoro_missing", return_value=[] if files else list(radio.KOKORO_PINS)):
+            return run(radio._voice_page, False)[1]
 
     def test_a_python_that_fits_gets_only_the_pip_step(self):
         cmd = own_line(f"{radio._cmdline([radio._console_python()], call=True)} -m {self.PIP}")
-        for done in (False, True):
-            with self.subTest(done=done):
-                out = self.page(done, (99, 0))
+        for files in (False, True):
+            with self.subTest(files=files):
+                out = self.page((99, 0), files=files)
                 lines = out.splitlines()
                 self.assertIn("Install its Python packages in a terminal. They need Python 99.0 or older:", out)
                 self.assertIn(cmd, lines)                                # pip in the Python just checked
-                self.assertEqual(self.AGAIN in out, not done)            # only before the download
-                self.assertEqual(f"  4. {self.AGAIN}" in lines, not done)
-                self.assertNotIn("  5. ", out)                           # one list, nothing else
+                self.assertEqual("Download kokoro" in out, not files)    # only the missing part
+                self.assertIn(f"  {2 if files else 4}. {self.AGAIN}", lines)
+                self.assertNotIn(f"  {3 if files else 5}. ", out)        # one list, nothing else
 
     def test_fits_quotes_a_program_path_with_a_space(self):
         with mock.patch.object(radio.sys, "executable", "C:/Program Files/Python312/pythonw.exe"):
-            out = self.page(False, (99, 0), "win32")
+            out = self.page((99, 0), "win32")
         self.assertIn(own_line(f'& "C:/Program Files/Python312/python.exe" -m {self.PIP}'), out.splitlines())
 
     def test_a_newer_python_gets_a_second_python_instead(self):
         why = f"Its Python packages need Python 3.0 or older, and this is Python {sys.version.split()[0]}."
         get = {"win32": "winget install Python.Python.3.0", "darwin": "brew install python@3.0"}
-        for done in (False, True):
+        for files in (False, True):
             for platform in OSES:
-                with self.subTest(done=done, platform=platform):
-                    out = self.page(done, (3, 0), platform)
+                with self.subTest(files=files, platform=platform):
+                    out = self.page((3, 0), platform, files)
                     lines = out.splitlines()
                     self.assertIn(why, out)
                     py = "py -3.0" if platform == "win32" else "python3.0"
@@ -269,8 +253,7 @@ class VoicePython(unittest.TestCase):
                     for os_name, cmd in get.items():
                         self.assertEqual(own_line(cmd) in lines, os_name == platform)
                     self.assertEqual("with your system's package manager" in out, platform == "linux")
-                    self.assertEqual(self.AGAIN in out, not done)
-                    self.assertEqual(f"  5. {self.AGAIN}" in lines, not done)
+                    self.assertIn(f"  {3 if files else 5}. {self.AGAIN}", lines)
 
 
 class DefaultDataFolder(unittest.TestCase):

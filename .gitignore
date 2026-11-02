@@ -30,11 +30,22 @@ __pycache__/
 # 2. Downloaded models and binaries. Large, separately licensed, and fetched by the
 #    user per THIRD_PARTY_NOTICES.md: Kokoro-82M ONNX + voices, the Qwen3 GGUF, the
 #    llama.cpp binaries and the gated T5Gemma tokenizer. The folders ship empty
-#    (.gitkeep) so the code finds them where it expects.
+#    (.gitkeep) so the code finds them where it expects. `radio setup <extra> install`
+#    also leaves the voice's own Python environment, downloads in progress (.part),
+#    llama.cpp's archive when its install stopped, and its unpacking folder (bin-*);
+#    llm/.answered records which llama-cli and model last answered, kokoro/.rendered
+#    which Python last spoke a Kokoro line.
 kokoro/*.onnx
 kokoro/*.bin
+kokoro/*.part
+kokoro/venv/
+kokoro/.rendered
 llm/*.gguf
+llm/*.part
+llm/.answered
 llm/bin/
+llm/bin-*/
+llm/llama-*-bin-*
 llm/t5gemma-tokenizer.json
 
 # 3. Claude Code's per-user files. .claude/CLAUDE.md is the project's shared notes and

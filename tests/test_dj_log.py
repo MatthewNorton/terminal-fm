@@ -70,6 +70,75 @@ class FallbackReason(unittest.TestCase):
         self.assertEqual(fail[2], "rc=1 (C:/py/python.exe) onnxruntime.InvalidArgument: Unexpected input data type")
 
 
+class StaleCache(unittest.TestCase):
+    """After a failed render the DJ searches again and, when that finds another interpreter, renders
+    the same line with it, so `radio setup`'s check (which skips a stale cache) and the DJ agree.
+    Fakes stand in for every program."""
+
+    def setUp(self):
+        reset_home()
+        dj.KOKORO_DIR.mkdir()
+        for name in ("kokoro-v1.0.fp16.onnx", "voices-v1.0.bin"):
+            (dj.KOKORO_DIR / name).write_bytes(b"x")
+        self.stale, self.venv = dj.ROOT / "stale-python.exe", dj.venv_python()
+        for exe in (self.stale, self.venv):
+            exe.parent.mkdir(parents=True, exist_ok=True)
+            exe.write_bytes(b"")
+        dj.KOKORO_PY_CACHE.write_text(str(self.stale), encoding="utf-8")
+        self.renders, self.broken = [], False
+        for target, name, kw in ((dj.subprocess, "run", {"side_effect": self.render}),
+                                 (dj, "_has_kokoro", {"side_effect": lambda py: py == str(self.venv)}),
+                                 (dj.shutil, "which", {"return_value": None})):
+            p = mock.patch.object(target, name, **kw)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def render(self, argv, **kw):
+        self.renders.append(argv[0])
+        if self.broken or argv[0] != str(self.venv):
+            return mock.Mock(returncode=3, stderr=b"ModuleNotFoundError: No module named 'kokoro_onnx'\n")
+        Path(argv[argv.index("--out") + 1]).write_bytes(b"RIFF")
+        return mock.Mock(returncode=0, stderr=b"")
+
+    def test_the_same_line_renders_with_the_python_that_has_it(self):
+        self.assertEqual(dj._kokoro_python({}, check=True), str(self.venv))     # what setup reports
+        wav = dj._kokoro_render("hello")
+        self.assertIsNotNone(wav)
+        self.assertEqual(self.renders, [str(self.stale), str(self.venv)])
+        self.assertEqual(dj.KOKORO_PY_CACHE.read_text(encoding="utf-8"), str(self.venv))
+        self.assertEqual(dj._kokoro_last, "")
+        wav.unlink()
+
+    def test_a_cached_python_that_imports_but_fails_gives_way_to_the_venv(self):
+        # kokoro-onnx 0.5.0 imports, but can't run the pinned model; the voice's environment can.
+        dj._has_kokoro.side_effect = lambda py: True
+        self.assertIsNotNone(dj._kokoro_render("hello"))
+        self.assertEqual(self.renders, [str(self.stale), str(self.venv)])
+
+    def test_the_same_interpreter_is_not_rendered_twice(self):
+        # A failure the search can't route around, such as a broken model, would only fail again.
+        dj.KOKORO_PY_CACHE.write_text(str(self.venv), encoding="utf-8")
+        self.broken = True
+        self.assertIsNone(dj._kokoro_render("hello"))
+        self.assertEqual(self.renders, [str(self.venv)])
+
+    def test_nothing_else_found_drops_the_cache(self):
+        dj._has_kokoro.side_effect = lambda py: False
+        self.assertIsNone(dj._kokoro_render("hello"))
+        self.assertEqual(self.renders, [str(self.stale)])
+        self.assertFalse(dj.KOKORO_PY_CACHE.exists())                   # the next line searches again
+
+    def test_a_line_that_worked_records_its_python_and_a_failure_forgets_it(self):
+        # `radio setup` reads this record instead of starting a Python to look for one.
+        self.assertIsNotNone(dj._kokoro_render("hello"))
+        self.assertEqual(dj.KOKORO_RENDERED.read_text(encoding="utf-8"), str(self.venv))
+        self.assertEqual(dj.rendered_with(), str(self.venv))            # the cache names it as well
+        self.broken = True
+        self.assertIsNone(dj._kokoro_render("hello"))
+        self.assertFalse(dj.KOKORO_RENDERED.exists())
+        self.assertIsNone(dj.rendered_with())
+
+
 class SideBySidePython(unittest.TestCase):
     """A Python 3.13 installed beside a newer default is found without dj.python: after the usual
     candidates, PY_VOICE_MAX down to PY_VOICE_MIN, through `py -3.X` on Windows and python3.X on PATH
@@ -132,6 +201,24 @@ class SideBySidePython(unittest.TestCase):
         with mock.patch.object(dj, "IS_WIN", False), mock.patch.object(dj.sys, "executable", "/usr/bin/python3"):
             self.assertEqual(dj._kokoro_python({}), "/usr/bin/python3.12")
         self.assertEqual([n for n in self.asked if n.startswith("python3.")], ["python3.13", "python3.12"])
+
+    def test_the_voices_own_environment_is_tried_first(self):
+        venv = dj.venv_python()                       # what `radio setup voice install` makes
+        venv.parent.mkdir(parents=True)
+        venv.write_bytes(b"")
+        self.kokoro = {str(venv), self.PYTHON}
+        self.assertEqual(dj._kokoro_python({}), str(venv))
+        self.assertEqual(self.calls[0][0], str(venv))
+
+    def test_a_check_tests_the_cache_and_keeps_nothing(self):
+        cached = dj.ROOT / "cached-python.exe"        # any existing file stands for an interpreter
+        cached.write_bytes(b"")
+        dj.KOKORO_PY_CACHE.write_text(str(cached), encoding="utf-8")
+        self.kokoro = {self.PYTHON}                   # the cached one has lost its packages
+        self.assertEqual(dj._kokoro_python({}), str(cached))               # the DJ trusts its cache
+        self.assertEqual(dj._kokoro_python({}, check=True), self.PYTHON)   # `setup` tests it, then searches
+        self.assertEqual(dj.KOKORO_PY_CACHE.read_text(encoding="utf-8"), str(cached))   # and caches nothing
+        self.assertIsNone(dj._kokoro_python({"python": str(cached)}, check=True))       # dj.python is final
 
 
 if __name__ == "__main__":

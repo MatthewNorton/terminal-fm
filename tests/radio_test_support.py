@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -53,6 +54,8 @@ def reset_home():
     radio.QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     radio.OUTDIR.mkdir(parents=True, exist_ok=True)
     radio._TOKENIZER = None
+    radio._voice_ready.cache_clear()
+    radio._takes_single_turn.cache_clear()
 
 
 def patch(case, name, **kwargs):
@@ -73,3 +76,47 @@ def run(fn, *args, **kwargs):
     with contextlib.redirect_stdout(buf):
         result = fn(*args, **kwargs)
     return result, buf.getvalue()
+
+
+OSES = ("win32", "darwin", "linux")
+
+
+@contextlib.contextmanager
+def on_os(platform):
+    """radio as it runs on `platform`, one of OSES: IS_WIN and sys.platform to match."""
+    with mock.patch.object(radio, "IS_WIN", platform == "win32"), \
+            mock.patch.object(radio.sys, "platform", platform):
+        yield
+
+
+# Where _hf_token looks for the user's Hugging Face login.
+HF_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH", "HF_HOME", "XDG_CACHE_HOME")
+
+
+class SetupCase(unittest.TestCase):
+    """`setup` tests: a fresh data folder, no API key, a throwaway Claude Code settings folder, and
+    neither the enhancer, a voice Python nor a Hugging Face login from this machine."""
+
+    def setUp(self):
+        reset_home()
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for var in ("STABILITY_API_KEY",) + HF_VARS:
+            os.environ.pop(var, None)
+        os.environ["HF_TOKEN_PATH"] = str(radio.ROOT / "no-login")
+        cfg = tempfile.mkdtemp(prefix="terminal-fm-cfg-")
+        self.addCleanup(shutil.rmtree, cfg, True)
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg          # never read the real ~/.claude/settings.json
+        self.cfg = Path(cfg)
+        patch(self, "_llm_paths", return_value=(None, None))
+        patch(self, "_voice_ready", return_value=None)     # never this machine's own Pythons
+
+    def ready(self):
+        patch(self, "detect_player", return_value=("/usr/bin/ffplay", None))
+        radio.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
+        (radio.OUTDIR / "a.mp3").write_bytes(b"ID3")
+        radio.HOOK_SEEN.write_text("2026-10-17 09:00", encoding="utf-8")
+
+    def setup_out(self, *args):
+        return run(radio.cmd_setup, list(args))[1]

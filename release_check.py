@@ -61,7 +61,9 @@ IGNORED = [
     "nowplaying.txt", "last_list.json", "last_archive.json",
     "resume.json", "playlist.json", "breaking.txt", "dj_speaking.lock", ".hook_seen", "queue/",
     "output/", "_dj*.wav", "__pycache__/", ".readme_sync/", MARKERS_FILE,
-    "kokoro/*.onnx", "kokoro/*.bin", "llm/*.gguf", "llm/bin/", "llm/t5gemma-tokenizer.json",
+    "kokoro/*.onnx", "kokoro/*.bin", "kokoro/*.part", "kokoro/venv/", "kokoro/.rendered",
+    "llm/*.gguf", "llm/*.part", "llm/.answered", "llm/bin/", "llm/bin-*/", "llm/llama-*-bin-*",
+    "llm/t5gemma-tokenizer.json",
     ".claude/*", "!.claude/CLAUDE.md", "CLAUDE.local.md",
 ]
 

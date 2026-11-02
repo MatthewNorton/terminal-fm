@@ -4,12 +4,23 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 
 ## [Unreleased]
 
+### Added
+
+- `/tfm setup <extra>` can install the extra for you. Claude shows what it would download, the disk space it needs and what it costs in Claude tokens, and asks first. `setup <extra> install` downloads each file from its publisher at a tested version, checks it against the publisher's SHA-256, runs a test, continues a stopped download when run again, and exits with 1 when it didn't install. The statusline's line is added by Claude, and Claude Code asks before `settings.json` changes.
+- The DJ voice's automatic install gives it its own Python environment, `~/.claude/terminal-fm/kokoro/venv`, and installs Python 3.13 first when no Python from 3.10 to 3.13 is found and winget (Windows) or Homebrew (macOS) is there to do it. A voice file already in place is kept only at the size of the tested download or of the older model-files-v1.0 release's, so a download of your own that stopped is replaced.
+
 ### Changed
 
 - New tracks are named after up to 60 characters of their prompt, cut at a whole word with single dashes, instead of 30 characters cut mid-word (`a-driving--upbeat-lofi-synthwa`). Tracks made before keep their names.
+- `setup tokens` is now `setup tokenizer`. The old name still works.
+- `setup` counts the DJ voice as installed once the Python the DJ uses has spoken a Kokoro line with whole model files, not when the model files are there: kokoro-onnx 0.5.0, for one, can't run the current model. It reads what the DJ recorded, so `setup` starts no Python for it.
+- `setup` counts the prompt enhancer as installed once its `llama-cli` and model have given an answer, not when the files are there. Its automatic install offers llama.cpp b11669 only when the `llama-cli` it would use doesn't start or has no `--single-turn`, and downloads the model again when a file of its name is the wrong size.
+- `setup` counts the exact tokenizer as installed when its file is the tested download's size or loads, not when any file is there; one that doesn't load is downloaded again.
+- The DJ looks for the voice's packages in the voice's own environment first. When its cached Python fails a line, it searches again and speaks that line with any other Python it finds.
 
 ### Fixed
 
+- The prompt enhancer's steps pointed at llama.cpp's newest release, v0.7.0, which holds no programs. They now name the tested build, b11669, and the archive for your system.
 - The DJ voice's packages need Python 3.13 or older, which README and `setup voice` now say; on a newer Python, `setup voice` shows how to install a Python 3.13 beside it, and the voice finds that Python by itself. Every pip command they print pins `"kokoro-onnx>=0.6"`, so pip on Python 3.14 refuses instead of quietly installing a kokoro-onnx too old for the voice.
 
 ### Security
