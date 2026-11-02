@@ -17,6 +17,7 @@ All notable changes to Terminal FM (called AI Radio before 1.0.0) are documented
 - `setup` counts the prompt enhancer as installed once its `llama-cli` and model have given an answer, not when the files are there. Its automatic install offers llama.cpp b11669 only when the `llama-cli` it would use doesn't start or has no `--single-turn`, and downloads the model again when a file of its name is the wrong size.
 - `setup` counts the exact tokenizer as installed when its file is the tested download's size or loads, not when any file is there; one that doesn't load is downloaded again.
 - The DJ looks for the voice's packages in the voice's own environment first. When its cached Python fails a line, it searches again and speaks that line with any other Python it finds.
+- `README.md` is shorter where it explained how the automatic installs work inside: the optional extras, the voice, enhancer and tokenizer sections and one troubleshooting row now say what you do and what you see. Those details are in `.claude/CLAUDE.md`.
 
 ### Fixed
 

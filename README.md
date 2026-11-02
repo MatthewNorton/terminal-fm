@@ -27,7 +27,7 @@ Check each one in a terminal (PowerShell on Windows). If a check fails, run the 
 
 **Why 3.11:** it's the oldest Python that still gets security fixes. `setup` flags anything older.
 
-**Want the DJ voice?** The optional [DJ voice](#dj-voice) needs Python 3.13 or older. Its automatic install finds one, and on Windows and macOS installs it for you when there's none (on Linux, install one with your package manager), so any Python 3.11 or newer works for the radio itself.
+**Want the DJ voice?** The optional [DJ voice](#dj-voice) needs Python 3.13 or older. Its automatic install finds one, or on Windows and macOS installs one, so any Python 3.11 or newer works for the radio itself.
 
 **Which player plays:** First found wins: `mpv` › `ffplay` › `afplay` (macOS) › `mpg123` › `cvlc`. Only `mpv`, `ffplay` and `cvlc` can resume a paused or interrupted track mid-song; the others restart it from the top.
 
@@ -83,7 +83,7 @@ Neither touches your library, key or settings in `~/.claude/terminal-fm` (see [F
 
 ## Optional extras
 
-Everything works without these. To add one, run `/tfm setup <name>`. Claude tells you what the automatic install would download and what it costs in Claude tokens, and asks before it runs anything. Choose **Install it**, or **Show me the steps** to do it by hand.
+Everything works without these. To add one, run `/tfm setup <name>`: Claude says what the automatic install would download and what it costs in Claude tokens, then asks. Choose **Install it**, or **Show me the steps** to do it by hand.
 
 | Extra | What you get | Without it | The automatic install | Claude's part |
 |---|---|---|---|---|
@@ -92,9 +92,9 @@ Everything works without these. To add one, run `/tfm setup <name>`. Claude tell
 | `enhancer` | `enhance` and `egen`, and better track lengths | Your idea is used as written, and keywords pick lengths | llama.cpp (12 to 20 MB) from GitHub and a 2.5 GB model from Hugging Face | 4 calls, about 2.5k new tokens |
 | `tokenizer` | An exact check of the 256-token prompt limit | An estimate of 4 characters a token | 34 MB from Hugging Face, with your own Hugging Face login | 2 calls, about 1.3k new tokens |
 
-**How it installs.** `/tfm setup <name> install` downloads each file from its publisher, at the version tested with Terminal FM, and checks it against the publisher's SHA-256. Then it runs a test and prints `Installed:`, or `Not installed:` and what went wrong, and exits with 1. A download that stops continues where it left off when you run the install again, and the disk only needs room for the part still to come, so one that a full disk stopped continues once you free that much. When the page can't offer an automatic install here (no Hugging Face login, or no Python for the voice on Linux, or on Windows or macOS without winget or Homebrew to install one), it says why instead, and Claude doesn't offer one.
+**How it installs.** Each file comes from its publisher at the version tested with Terminal FM and is checked against its SHA-256. A short test then ends the install with `Installed:`, or `Not installed:` and the reason. If a download stops, run the install again to continue where it left off. When an install can't run on your machine, the page says why.
 
-**Claude's part** is what the install costs in Claude once you say yes: its calls, and the new tokens they add. It was measured on 2026-10-21 with Claude Opus 5.5. Each call also re-reads the conversation so far, so a long conversation costs more. Two figures are estimates. The statusline's, because measuring it meant editing a real `settings.json`. The voice's, because Claude now runs its install in the background like the enhancer's: Claude Code stops a command after 10 minutes, and the voice's 192 MB alone take longer than that below about 2.6 Mbit/s. Its figure is the enhancer's measured background run.
+**Claude's part** is what the install costs in Claude after you say yes, measured with Claude Opus 5.5 on 2026-10-21. Each call also re-reads the conversation so far, so a longer conversation costs more. The statusline's and voice's figures are estimates.
 
 ### Statusline
 
@@ -111,13 +111,11 @@ Everything works without these. To add one, run `/tfm setup <name>`. Claude tell
 
 The automatic install:
 
-1. Makes the voice its own Python environment, `~/.claude/terminal-fm/kokoro/venv`, with `kokoro-onnx` and `soundfile` from PyPI. They need Python 3.13 or older: it uses yours, or one installed beside it, and otherwise installs Python 3.13 for your user first (winget on Windows, Homebrew on macOS). Without winget or Homebrew, or on Linux, it asks you to install one yourself. It skips this when a Python with `kokoro-onnx` 0.6 or newer is already set up. If `dj.python` in `config.json` names a Python without them, it stops and says so, because the DJ always uses that one.
-2. Downloads `kokoro-v1.0.fp16.onnx` (164 MB) and `voices-v1.0.bin` (28 MB) into `~/.claude/terminal-fm/kokoro/`. A file already there is kept when it's the size of this download or of the older model-files-v1.0 release's; any other size, such as a download of your own that stopped, is downloaded again.
+1. Gives the voice its own Python environment, `~/.claude/terminal-fm/kokoro/venv`, with `kokoro-onnx` and `soundfile` from PyPI. These need Python 3.13 or older: it uses yours or one beside it, and otherwise installs Python 3.13 for your user (winget on Windows, Homebrew on macOS). On Linux, or without winget or Homebrew, it asks you to install one. It skips this step when a Python with `kokoro-onnx` 0.6 or newer is already set up, and stops if `dj.python` in `config.json` names a Python without it, since the DJ always uses that one.
+2. Downloads `kokoro-v1.0.fp16.onnx` (164 MB) and `voices-v1.0.bin` (28 MB) into `~/.claude/terminal-fm/kokoro/`. A file there that isn't whole, such as a download that stopped, is downloaded again.
 3. Renders a test line without playing it.
 
-`setup` counts the voice as installed once the model files are whole and the Python the DJ uses has spoken a Kokoro line with them, in that test or on air; a line that fails clears it. So `setup` checks the voice without starting a Python.
-
-Claude runs it in the background, because on a slow connection it can take longer than the 10 minutes Claude Code allows a command.
+`setup` lists the voice as installed once it has spoken a line with whole files, in that test or on air, until a line fails. Claude runs the install in the background, because on a slow connection it can take longer than the 10 minutes Claude Code allows a command.
 
 By hand:
 
@@ -126,13 +124,13 @@ By hand:
 3. On Python 3.13 or older, in a terminal: `pip install -U "kokoro-onnx>=0.6" soundfile`
 4. On a newer one, run `/tfm setup voice`. It prints the steps to install a Python 3.13 beside it on your system.
 
-The radio finds a Python that has these packages by itself, the voice's own environment first. To pin one, set `dj.python` in `config.json`. On Linux without a system voice, `sudo apt install espeak-ng` gives a basic one.
+The radio finds a Python with these packages by itself; to pin one, set `dj.python` in `config.json`. On Linux without a system voice, `sudo apt install espeak-ng` gives a basic one.
 
 ### Prompt enhancer
 
-The automatic install puts llama.cpp build b11669 for your system (its CPU build) in `~/.claude/terminal-fm/llm/bin/` and `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` in `~/.claude/terminal-fm/llm/`, then asks the model a test question. It needs about 2.6 GB free. The model alone is 2.5 GB, about 3 minutes at 100 Mbit/s and 33 at 10, so Claude runs the install in the background.
+The automatic install puts llama.cpp build b11669 (the CPU build for your system) in `~/.claude/terminal-fm/llm/bin/` and `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` in `~/.claude/terminal-fm/llm/`, then asks the model a test question. It needs about 2.6 GB free. The 2.5 GB model takes about 3 minutes at 100 Mbit/s and 33 at 10, so Claude runs the install in the background.
 
-`setup` counts the enhancer as installed once its `llama-cli` and model have given an answer, in that test or in `enhance`. Until then the install offers the test again. It also offers build b11669, which the radio then uses first, when the `llama-cli` it would use doesn't start (a copy without the files beside it) or its `--help` doesn't list `--single-turn`, in `llm/bin` or on your PATH. A `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` of another size than its download's, such as a download of your own that stopped, is downloaded again; another `.gguf` you chose is left alone.
+`setup` lists the enhancer as installed once its `llama-cli` and model have answered, in that test or in `enhance`. If your own `llama-cli` doesn't start or lacks `--single-turn`, the install adds build b11669 and the radio uses that first. A `Qwen3-4B-Instruct-2507-Q4_K_M.gguf` that isn't whole is downloaded again; another `.gguf` you chose is left alone.
 
 By hand:
 
@@ -147,7 +145,7 @@ It runs on the CPU and exits when it's done, so it doesn't use your GPU or keep 
 
 Google's tokenizer is gated: first accept Google's Gemma terms at <https://huggingface.co/google/t5gemma-b-b-ul2> with your Hugging Face account.
 
-The automatic install downloads its `tokenizer.json` (34 MB) with the Hugging Face login on your computer: the `HF_TOKEN` variable, or the token file `hf auth login` saves (`~/.cache/huggingface/token`). Without one, `/tfm setup tokenizer` says how to add it. The token is never printed, and Claude never asks for it. `setup` counts the tokenizer as installed when its file is that download's size, or another file that loads; one that doesn't load, such as a download that stopped, is downloaded again.
+The automatic install downloads its `tokenizer.json` (34 MB) with your Hugging Face login: the `HF_TOKEN` variable, or the token file `hf auth login` saves (`~/.cache/huggingface/token`). Without one, `/tfm setup tokenizer` says how to add it. The token is never printed, and Claude never asks for it. A tokenizer file that doesn't load, such as a download that stopped, is downloaded again.
 
 By hand:
 
@@ -240,7 +238,7 @@ Picking tracks by number:
 - One number is always a length, never a count. A lone number under 10 is refused as a likely mistake; for 3 tracks, type `gen "<prompt>" 3 auto`.
 - More than 20 tracks asks you to type `yes`.
 
-**File names.** A new track is named after the start of its prompt, up to 60 characters and cut at a whole word, then the date, time and its number: `warm lo-fi hip hop, rhodes, vinyl crackle, 80 BPM` is saved as `warm-lo-fi-hip-hop-rhodes-vinyl-crackle-80-bpm-20261028-190000-1.mp3`. That stays well inside the file name and path limits of Windows, macOS and Linux. Tracks made before this keep their names.
+**File names.** A new track is named after the start of its prompt, up to 60 characters and cut at a whole word, then the date, time and its number: `warm lo-fi hip hop, rhodes, vinyl crackle, 80 BPM` is saved as `warm-lo-fi-hip-hop-rhodes-vinyl-crackle-80-bpm-20261028-190000-1.mp3`.
 
 **How the length is picked** when you don't type one:
 
@@ -479,7 +477,7 @@ Start with `/tfm setup`. If that doesn't explain it:
 | The DJ sounds robotic | That's Windows SAPI, used when Kokoro isn't installed or fails. The end of `dj_engine.log` says which: `kokoro not installed`, or a `kokoro-fail` line naming the Python and the error. Install the voice's packages as [DJ voice](#dj-voice) shows, or point `dj.python` at a Python that has them. |
 | `gen "<prompt>" 3` is refused | One number is a length, and 3 seconds isn't a track. For three tracks: `gen "<prompt>" 3 auto`. |
 | `gen` refuses a long prompt | Cut what the message says, or let `enhance` rewrite it. `estimated` in the message means the exact token count isn't installed (`/tfm setup tokenizer`). |
-| An automatic install stopped or failed | Its `Not installed:` line says why. Run the same `/tfm setup <extra> install` again: it skips what's done and continues a download where it stopped. A file that fails its SHA-256 check is deleted and downloaded again. A certificate that didn't verify names `stability_api.ca_bundle` when it points at a file that exists, since the downloads check your system's certificates plus that file. |
+| An automatic install stopped or failed | Its `Not installed:` line says why. Run the same `/tfm setup <extra> install` again: it skips what's done, continues a stopped download, and downloads again a file that failed its SHA-256 check. For a certificate error with `stability_api.ca_bundle` set, check that file: downloads trust your system's certificates plus it. |
 | `gen` pauses before generating | With no length typed, the enhancer's model picks one, which took 9 to 14 seconds on a CPU in testing. Type a length to skip it. |
 | `Cost: unknown` | Your Stability balance hadn't updated when `gen` finished. The charge shows up later. |
 | `gen` fails with `HTTP ???` or `certificate has expired` | The request never reached the API, and the text after it is the reason. For `certificate has expired`, set `stability_api.ca_bundle` to certifi's `cacert.pem`. |
