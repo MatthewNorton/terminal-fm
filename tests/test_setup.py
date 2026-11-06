@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import OSES, REPO, SetupCase, on_os, own_line, patch, radio, reset_home, run
+from radio_test_support import OSES, REPO, SetupCase, code_files, core, on_os, own_line, patch, radio, reset_home, run
 
 import dj  # noqa: E402  (after radio_test_support, which points TERMINAL_FM_HOME at the test home)
 
@@ -59,7 +59,7 @@ class Setup(SetupCase):
 
     def test_first_track_is_the_last_step(self):
         self.ready()
-        (radio.OUTDIR / "a.mp3").unlink()
+        (core.OUTDIR / "a.mp3").unlink()
         out = self.setup_out()
         self.assertIn("Step 5 of 5: First track", out)
         self.assertIn(own_line("/tfm play"), out.splitlines())
@@ -67,7 +67,7 @@ class Setup(SetupCase):
 
     def test_hooks_on_windows_without_git_bash(self):
         self.ready()
-        radio.HOOK_SEEN.unlink()
+        core.HOOK_SEEN.unlink()
         patch(self, "IS_WIN", new=True)
         patch(self, "_git_bash", return_value=None)
         out = self.setup_out()
@@ -76,7 +76,7 @@ class Setup(SetupCase):
 
     def test_wav_mp3_without_ffmpeg_is_a_step(self):
         self.ready()
-        cfg = radio.load_config()
+        cfg = core.load_config()
         cfg["stability_api"]["output_format"] = radio.BOTH_FORMATS
         patch(self, "CONFIG", new=cfg)
         patch(self, "_ffmpeg", return_value=None)
@@ -118,8 +118,8 @@ class SetupExtras(SetupCase):
     def test_cmd_setup_names_every_extra(self):
         # cmd_setup compares its argument to an inline tuple, because readme_check.py reads the
         # keywords a command accepts from such comparisons; it must name every extra in the table.
-        tree = ast.parse((REPO / "radio.py").read_text(encoding="utf-8"))
-        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "cmd_setup")
+        fn = next(n for f in code_files() for n in ast.parse(f.read_text(encoding="utf-8")).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "cmd_setup")
         inline = next({e.value for e in c.comparators[0].elts} for c in ast.walk(fn)
                       if isinstance(c, ast.Compare) and isinstance(c.comparators[0], ast.Tuple))
         self.assertEqual(inline, {name for name, *_ in radio._setup_extras()})
@@ -135,7 +135,7 @@ class SetupExtras(SetupCase):
         self.assertEqual(radio._statusline_state(), "other")
         radio._install_statusline()                               # what the session-start hook does
         out = self.setup_out("statusline")
-        self.assertIn(own_line(str(radio.NOW_FILE)), out.splitlines())
+        self.assertIn(own_line(str(core.NOW_FILE)), out.splitlines())
         self.assertNotIn('"statusLine"', out)                     # never a snippet that replaces theirs
 
     def test_statusline_line_parses_as_settings(self):
@@ -153,7 +153,7 @@ class SetupExtras(SetupCase):
         self.assertIn("finish /tfm setup first", self.setup_out("statusline"))
 
     def test_pages_name_this_installs_paths(self):
-        for name, path in (("voice", radio.ROOT / "kokoro"), ("enhancer", radio.LLM_DIR),
+        for name, path in (("voice", core.ROOT / "kokoro"), ("enhancer", radio.LLM_DIR),
                            ("tokenizer", radio.TOKENIZER_FILE)):
             with self.subTest(name):
                 out = self.setup_out(name)
@@ -258,14 +258,15 @@ class VoicePython(unittest.TestCase):
 
 class DefaultDataFolder(unittest.TestCase):
     def test_every_file_defaults_to_the_same_folder(self):
-        # radio.py, dj.py, kokoro_tts.py and statusline.py each work out the data folder (statusline.py
-        # is copied out alone, so it can't share the code); a file missed in a rename would split it.
+        # tfm/core.py (radio.py's), dj.py, kokoro_tts.py and statusline.py each work out the data folder
+        # (statusline.py is copied out alone, so it can't share the code); a file missed in a rename
+        # would split it.
         home = tempfile.mkdtemp(prefix="terminal-fm-home-")
         self.addCleanup(shutil.rmtree, home, True)
         env = {k: v for k, v in os.environ.items() if k != "TERMINAL_FM_HOME"}
         env.update(HOME=home, USERPROFILE=home)        # Path.home(): HOME on POSIX, USERPROFILE on Windows
         want = str(Path(home) / ".claude" / "terminal-fm")
-        for module, expr in (("radio", "radio.ROOT"), ("dj", "dj.ROOT"), ("kokoro_tts", "kokoro_tts.ROOT"),
+        for module, expr in (("tfm.core", "tfm.core.ROOT"), ("dj", "dj.ROOT"), ("kokoro_tts", "kokoro_tts.ROOT"),
                              ("statusline", "statusline.data_dir()")):
             with self.subTest(module):
                 code = f"import sys; sys.path.insert(0, {str(REPO)!r}); import {module}; print({expr})"
@@ -276,23 +277,23 @@ class DefaultDataFolder(unittest.TestCase):
 
 class SelfCommand(unittest.TestCase):
     def test_windows_paths_with_spaces_get_the_call_operator(self):
-        with mock.patch.object(radio, "IS_WIN", True), \
+        with mock.patch.object(core, "IS_WIN", True), \
                 mock.patch.object(radio.sys, "executable", "C:/Program Files/Python312/pythonw.exe"), \
-                mock.patch.object(radio, "CODE_DIR", Path("D:/My Apps/radio")):
+                mock.patch.object(core, "CODE_DIR", Path("D:/My Apps/radio")):
             cmd = radio._self_cmd("key")
         self.assertEqual(cmd, '& "C:/Program Files/Python312/python.exe" '
                               '"D:/My Apps/radio/radio.py" key')
 
     @unittest.skipUnless(os.name == "nt", "Windows backslash paths")
     def test_windows_paths_without_spaces_stay_bare(self):
-        with mock.patch.object(radio, "IS_WIN", True), \
+        with mock.patch.object(core, "IS_WIN", True), \
                 mock.patch.object(radio.sys, "executable", r"C:\Python312\python.exe"), \
-                mock.patch.object(radio, "CODE_DIR", Path(r"D:\Apps\radio")):
+                mock.patch.object(core, "CODE_DIR", Path(r"D:\Apps\radio")):
             self.assertEqual(radio._self_cmd("key"), "C:/Python312/python.exe D:/Apps/radio/radio.py key")
 
     @unittest.skipIf(os.name == "nt", "POSIX quoting")
     def test_posix_quoting_round_trips(self):
-        with mock.patch.object(radio, "CODE_DIR", Path("/opt/my apps/radio")):
+        with mock.patch.object(core, "CODE_DIR", Path("/opt/my apps/radio")):
             cmd = radio._self_cmd("key")
         self.assertEqual(shlex.split(cmd)[1:], ["/opt/my apps/radio/radio.py", "key"])
 
@@ -306,9 +307,9 @@ class KeyMessages(SetupCase):
     def test_hook_marks_session_start_only(self):
         with open(os.devnull) as nul, mock.patch.object(radio.sys, "stdin", nul):
             run(radio.cmd_hook, ["Stop"])
-            self.assertFalse(radio.HOOK_SEEN.exists())
+            self.assertFalse(core.HOOK_SEEN.exists())
             run(radio.cmd_hook, ["SessionStart"])
-        self.assertRegex(radio.HOOK_SEEN.read_text(encoding="utf-8"), r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
+        self.assertRegex(core.HOOK_SEEN.read_text(encoding="utf-8"), r"^\d{4}-\d\d-\d\d \d\d:\d\d$")
 
 
 class StatuslineCopy(unittest.TestCase):
@@ -316,11 +317,11 @@ class StatuslineCopy(unittest.TestCase):
         reset_home()
 
     def temp_files(self):
-        return list(radio.ROOT.glob("statusline.py.*.tmp"))
+        return list(core.ROOT.glob("statusline.py.*.tmp"))
 
     def test_copies_and_cleans_up(self):
         radio._install_statusline()
-        self.assertEqual(radio.STATUSLINE_DST.read_bytes(), radio.STATUSLINE_SRC.read_bytes())
+        self.assertEqual(core.STATUSLINE_DST.read_bytes(), core.STATUSLINE_SRC.read_bytes())
         self.assertEqual(self.temp_files(), [])
 
     def test_refused_rename_leaves_no_temp_file(self):
@@ -333,10 +334,13 @@ class StatuslineCopy(unittest.TestCase):
     def test_only_a_playing_track_writes_a_marker(self):
         # statusline.py, and any statusline following README, shows "playing" when the text has a `>`.
         texts = []
-        for call in ast.walk(ast.parse((REPO / "radio.py").read_text(encoding="utf-8"))):
-            if isinstance(call, ast.Call) and getattr(call.func, "id", "") == "write_now":
-                texts.append("".join(n.value for n in ast.walk(call.args[0])
-                                     if isinstance(n, ast.Constant) and isinstance(n.value, str)))
+        for f in code_files():
+            for call in ast.walk(ast.parse(f.read_text(encoding="utf-8"))):
+                if not isinstance(call, ast.Call):
+                    continue
+                if getattr(call.func, "id", getattr(call.func, "attr", "")) == "write_now":  # or core.write_now
+                    texts.append("".join(n.value for n in ast.walk(call.args[0])
+                                         if isinstance(n, ast.Constant) and isinstance(n.value, str)))
         playing = [t for t in texts if t.startswith("Terminal FM > ")]
         self.assertEqual(len(playing), 1, texts)
         self.assertEqual([t for t in texts if ">" in t], playing)
@@ -345,7 +349,7 @@ class StatuslineCopy(unittest.TestCase):
 @unittest.skipUnless(shutil.which("sh"), "needs sh")
 class HookLauncher(unittest.TestCase):
     def launch(self, event, pythons):
-        env = dict(os.environ, RADIO_HOOK_PYTHONS=pythons, TERMINAL_FM_HOME=str(radio.ROOT))
+        env = dict(os.environ, RADIO_HOOK_PYTHONS=pythons, TERMINAL_FM_HOME=str(core.ROOT))
         return subprocess.run(["sh", str(HOOK), event], input="{}",
                               capture_output=True, text=True, env=env, timeout=60)
 
@@ -368,7 +372,7 @@ class HookLauncher(unittest.TestCase):
         reset_home()
         r = self.launch("SessionStart", Path(sys.executable).as_posix())
         self.assertEqual((r.returncode, r.stdout), (0, ""))
-        self.assertTrue(radio.HOOK_SEEN.exists())
+        self.assertTrue(core.HOOK_SEEN.exists())
 
 
 if __name__ == "__main__":

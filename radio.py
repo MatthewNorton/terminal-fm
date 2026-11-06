@@ -23,7 +23,7 @@ Architecture
 * The PLAYER is auto-detected per OS (mpv > ffplay > afplay > mpg123 > cvlc) and plays
   files OR stream URLs uniformly.
 * State lives in the data directory (~/.claude/terminal-fm, or TERMINAL_FM_HOME): state.json,
-  nowplaying.txt, config.json and the other files named under "paths" below.
+  nowplaying.txt, config.json and the other files named in tfm/core.py.
 """
 
 import csv
@@ -49,206 +49,7 @@ import uuid
 from collections import namedtuple
 from pathlib import Path, PurePosixPath
 
-# --------------------------------------------------------------------------- paths
-# Two roots. CODE_DIR is wherever this file lives (a clone, a plugin install, ~/.claude/terminal-fm) and
-# holds the scripts and prompts/. ROOT is the data directory: state, config, the key, the library,
-# downloaded models and logs. It defaults to ~/.claude/terminal-fm and TERMINAL_FM_HOME overrides it, so a
-# checkout anywhere still finds dj.py next to itself and still shares one library and one config.
-CODE_DIR = Path(__file__).resolve().parent
-ROOT = Path(os.path.expanduser(os.environ.get("TERMINAL_FM_HOME", "").strip()
-                               or str(Path.home() / ".claude" / "terminal-fm")))
-DEFAULT_OUTDIR = ROOT / "output"    # library lives here unless config.json overrides library_dir
-STATE_FILE = ROOT / "state.json"
-NOW_FILE = ROOT / "nowplaying.txt"
-KEY_FILE = ROOT / ".key"
-CONFIG_FILE = ROOT / "config.json"
-DJ_SCRIPT = CODE_DIR / "dj.py"
-# The plugin can't set the user's statusLine and its own folder moves on every update, so the
-# SessionStart hook copies this script into the data directory, a path a settings snippet can keep.
-STATUSLINE_SRC = CODE_DIR / "statusline.py"
-STATUSLINE_DST = ROOT / "statusline.py"
-QUEUE_DIR = ROOT / "queue"          # one file per pending DJ line (race-free FIFO)
-SPEAK_LOCK = ROOT / "dj_speaking.lock"   # held while an idle announcement is being spoken
-BREAKING_FILE = ROOT / "breaking.txt"    # pending "breaking news": interrupt the track, speak, resume
-RESUME_FILE = ROOT / "resume.json"       # pause point: {track, offset} the daemon replays on next start
-PLAYLIST_FILE = ROOT / "playlist.json"   # ordered [names]; when present the daemon plays this exact order (looping) instead of shuffle
-LIST_FILE = ROOT / "last_list.json"      # snapshot of the last `radio list` order so numeric selections map to what was shown
-ARCHIVE_LIST_FILE = ROOT / "last_archive.json"  # same idea for `radio unarchive` numbering
-HISTORY_FILE = ROOT / "prompt_history.jsonl"    # append-only: one JSON record per generated track
-HOOK_SEEN = ROOT / ".hook_seen"          # time of the last SessionStart hook, for `radio setup`
-ARCHIVE_DIRNAME = "_archive"             # subfolder of the library; get_library()'s non-recursive
-                                         # glob is what keeps archived tracks out of rotation
-# `radio drop` target: ONE shared reject pile under output/, whichever folder the track played from
-# (unlike _archive, which sits inside each library), so rejects from every collection meet there.
-BAD_DIR = DEFAULT_OUTDIR / "bad song"
-QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-
-IS_WIN = os.name == "nt"
-DEVNULL = subprocess.DEVNULL
-CREATE_NO_WINDOW = 0x08000000 if IS_WIN else 0   # hide child console windows on Windows
-
-# --------------------------------------------------------------------------- config
-DEFAULT_CONFIG = {
-    "source": "stability-api",
-    "volume": 85,
-    "library_dir": "",   # folder the radio plays from; "" = <root>/output (see resolve_outdir)
-    "stability_api": {
-        "submit_url": "https://api.stability.ai/v2beta/audio/stable-audio/text-to-audio",
-        "results_url": "https://api.stability.ai/v2beta/audio/results",
-        "balance_url": "https://api.stability.ai/v1/user/balance",   # exact cost = balance drop
-        "model": "stable-audio-3",
-        "steps": 8,          # SA3 is fixed at 8
-        "duration": 120,     # fallback when gen's auto-pick has nothing to go on (pick_duration)
-        "output_format": "mp3",
-        "ca_bundle": "",     # PEM to verify against; "" = platform trust store (see _ssl_context)
-    },
-    "dj": {"announce_when_idle": False, "breaking_news": False},
-}
-
-
-def load_config():
-    cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
-    if CONFIG_FILE.exists():
-        try:
-            user = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            for k, v in user.items():
-                if isinstance(v, dict) and isinstance(cfg.get(k), dict):
-                    cfg[k].update(v)
-                else:
-                    cfg[k] = v
-        except Exception:
-            pass
-    return cfg
-
-
-def resolve_outdir(cfg):
-    """The folder the radio plays from. config.json 'library_dir' overrides the default; ~ and
-    env vars expand, relative paths resolve against ROOT. Falls back to <root>/output."""
-    raw = (cfg.get("library_dir") or "").strip()
-    if not raw:
-        return DEFAULT_OUTDIR
-    p = Path(os.path.expandvars(os.path.expanduser(raw)))
-    if not p.is_absolute():
-        p = ROOT / p
-    return p
-
-
-CONFIG = load_config()
-OUTDIR = resolve_outdir(CONFIG)
-try:
-    OUTDIR.mkdir(parents=True, exist_ok=True)
-except OSError as _e:
-    # A library_dir that can't be created must not take every command down with an import-time
-    # traceback (it did, until 2026-09-28). Fall back to the default folder and say so.
-    try:
-        print(f"Warning: library folder {OUTDIR} cannot be created ({_e}); using {DEFAULT_OUTDIR}. "
-              f"Fix or reset it with:  radio folder default", file=sys.stderr)
-    except Exception:
-        pass
-    OUTDIR = DEFAULT_OUTDIR
-    OUTDIR.mkdir(parents=True, exist_ok=True)
-# Archived tracks live beside the library they came from. Created lazily on first archive so we
-# don't litter an empty _archive into every folder the user points at.
-ARCHIVE_DIR = OUTDIR / ARCHIVE_DIRNAME
-
-# --------------------------------------------------------------------------- state
-def read_state():
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {"status": "stopped", "daemon_pid": None, "player_pid": None, "now_playing": None}
-
-
-def _atomic_write(path, text):
-    """Write a whole file so a reader never sees a half-written one: write a sibling temp file,
-    then rename over the target. Several processes share these files (daemon, CLI, hook,
-    statusline), and a torn state.json read as "stopped" or a torn config.json lost settings.
-    If the rename is refused (Windows, when a reader has the file open) fall back to a direct write."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        path.write_text(text, encoding="utf-8")
-
-
-def _write_json(path, obj, **dumps_kw):
-    _atomic_write(path, json.dumps(obj, **dumps_kw))
-
-
-def _write_private(path, text):
-    """Write a secret so it is owner-only (0600 on POSIX) from the moment it exists. The temp file
-    is created with that mode, never with the umask's default, and then renamed into place: the
-    key used to be written world-readable under a typical umask and chmod-ed only afterwards.
-    Windows ignores the mode (the file inherits the folder's permissions), and when it refuses the
-    rename this writes the target directly, still through a 0600 descriptor."""
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    _unlink_quiet(tmp)                  # O_EXCL below: never reuse a file someone else created
-    try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except OSError:
-        _unlink_quiet(tmp)
-        # Security: not _atomic_write, whose write_text uses the umask's mode (readable by others
-        # on a typical system). O_CREAT's mode skips an existing file, so tighten it before the key
-        # goes in; Windows has no fchmod before 3.13.
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            if hasattr(os, "fchmod"):
-                os.fchmod(fd, 0o600)
-            fh.write(text)
-    try:
-        os.chmod(path, 0o600)           # exactly 0600 whatever the umask took off os.open's mode
-    except OSError:
-        pass
-
-
-def _unlink_quiet(path):
-    """Delete a file if it is there. Missing or locked is not an error: every caller is tidying up
-    and must not take playback down over it."""
-    try:
-        path.unlink()
-    except Exception:
-        pass
-
-
-def write_state(**kw):
-    _write_json(STATE_FILE, kw, indent=2)
-
-
-def write_now(text):
-    _atomic_write(NOW_FILE, text)
-
-
-def set_config(section, key, value):
-    """Persist a single setting into config.json, merging with whatever is already there.
-    Returns True if written. An unreadable config.json is left alone and reported, never replaced
-    with {} (which silently wiped every other setting until 2026-09-28)."""
-    data = {}
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                raise ValueError("top level is not an object")
-        except Exception as e:
-            print(f"Not saved: {CONFIG_FILE} is not valid JSON ({e}). Fix or delete it first.")
-            return False
-    if section:
-        if not isinstance(data.get(section), dict):
-            data[section] = {}
-        data[section][key] = value
-    else:
-        data[key] = value
-    _write_json(CONFIG_FILE, data, indent=2)
-    return True
+from tfm import core
 
 
 # File types gen can save (`radio format`) and the library plays. Non-recursive on purpose: the
@@ -271,12 +72,12 @@ def _audio_in(folder):
 
 
 def get_library():
-    return _audio_in(OUTDIR)
+    return _audio_in(core.OUTDIR)
 
 
 # ---- archive: tracks the user doesn't want, moved out of rotation but not deleted --------------
 def archived_tracks():
-    return _audio_in(ARCHIVE_DIR)
+    return _audio_in(core.ARCHIVE_DIR)
 
 
 def _move_track(track, dest_dir, retries=16, delay=0.25):
@@ -307,18 +108,18 @@ def _playlist_drop(names):
     """Drop names from playlist.json after archiving. Deleting the file (back to shuffle) when
     nothing is left matters: a playlist pointing only at moved files would otherwise leave the
     daemon spinning on tracks that no longer exist."""
-    if not PLAYLIST_FILE.exists():
+    if not core.PLAYLIST_FILE.exists():
         return
     try:
         drop = set(names)
-        keep = [n for n in json.loads(PLAYLIST_FILE.read_text(encoding="utf-8")) if n not in drop]
+        keep = [n for n in json.loads(core.PLAYLIST_FILE.read_text(encoding="utf-8")) if n not in drop]
     except Exception:
         return
     try:
         if keep:
-            _write_json(PLAYLIST_FILE, keep)
+            core._write_json(core.PLAYLIST_FILE, keep)
         else:
-            PLAYLIST_FILE.unlink()
+            core.PLAYLIST_FILE.unlink()
             print("  Playlist is now empty - back to full-library shuffle.")
     except Exception:
         pass
@@ -343,7 +144,7 @@ def history_add(prompt, duration, filename, idea=None, source=None, kind="gen"):
     if kind != "gen":       # absent = generated, so every older record stays correct
         rec["kind"] = kind
     try:
-        with HISTORY_FILE.open("a", encoding="utf-8") as fh:
+        with core.HISTORY_FILE.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass        # history is a convenience; never let it break a generation
@@ -351,11 +152,11 @@ def history_add(prompt, duration, filename, idea=None, source=None, kind="gen"):
 
 def history_all():
     """Every recorded generation, oldest first. Bad lines are skipped, not fatal."""
-    if not HISTORY_FILE.exists():
+    if not core.HISTORY_FILE.exists():
         return []
     out = []
     try:
-        lines = HISTORY_FILE.read_text(encoding="utf-8").splitlines()
+        lines = core.HISTORY_FILE.read_text(encoding="utf-8").splitlines()
     except Exception:
         return []
     for line in lines:
@@ -378,11 +179,11 @@ def _history_where(rec):
     name = rec.get("file") or ""
     if not name:
         return "-"
-    if (OUTDIR / name).exists():
+    if (core.OUTDIR / name).exists():
         return "library"
-    if (ARCHIVE_DIR / name).exists():
+    if (core.ARCHIVE_DIR / name).exists():
         return "archived"
-    if (BAD_DIR / name).exists():
+    if (core.BAD_DIR / name).exists():
         return "bad song"
     return "missing"
 
@@ -401,7 +202,7 @@ def _saved_order(list_file, folder):
 def list_snapshot():
     """The ordered tracks the last `radio list` showed (so numbers stay stable even if the library
     changed since). Falls back to the live library order if there's no snapshot."""
-    return _saved_order(LIST_FILE, OUTDIR) or get_library()
+    return _saved_order(core.LIST_FILE, core.OUTDIR) or get_library()
 
 
 def _pick_unique(tracks, idx):
@@ -417,13 +218,13 @@ def _pick_unique(tracks, idx):
 
 def load_playlist():
     """Ordered list of existing track Paths from playlist.json, or None if no playlist is set."""
-    if not PLAYLIST_FILE.exists():
+    if not core.PLAYLIST_FILE.exists():
         return None
     try:
-        names = json.loads(PLAYLIST_FILE.read_text(encoding="utf-8"))
+        names = json.loads(core.PLAYLIST_FILE.read_text(encoding="utf-8"))
     except Exception:
         return None
-    tracks = [(Path(n) if os.path.isabs(n) else OUTDIR / n) for n in names]
+    tracks = [(Path(n) if os.path.isabs(n) else core.OUTDIR / n) for n in names]
     tracks = [t for t in tracks if t.exists()]
     return tracks or None
 
@@ -466,7 +267,7 @@ def parse_selection(tokens, n):
 
 # ---- DJ queue (Claude writes lines; the daemon speaks them between tracks) ---
 def queue_files():
-    return sorted(QUEUE_DIR.glob("*.txt"))
+    return sorted(core.QUEUE_DIR.glob("*.txt"))
 
 
 def queue_add(text, front=False):
@@ -476,20 +277,20 @@ def queue_add(text, front=False):
     # The daemon reads the oldest name first. A "0-" prefix sorts ahead of every timestamped
     # name, so front=True (a `play --say` sign-on) jumps lines that were already waiting.
     name = f"{'0-' if front else ''}{time.time_ns()}-{random.randint(1000, 9999)}.txt"
-    (QUEUE_DIR / name).write_text(text, encoding="utf-8")
+    (core.QUEUE_DIR / name).write_text(text, encoding="utf-8")
     return True
 
 
 def _say_file(path):
     """Speak the line in `path` through dj.py (blocking), then delete the file."""
     try:
-        if DJ_SCRIPT.exists():
-            subprocess.run([sys.executable, str(DJ_SCRIPT), "say", "--file", str(path)],
-                           stdout=DEVNULL, stderr=DEVNULL, timeout=180,
-                           creationflags=CREATE_NO_WINDOW)
+        if core.DJ_SCRIPT.exists():
+            subprocess.run([sys.executable, str(core.DJ_SCRIPT), "say", "--file", str(path)],
+                           stdout=core.DEVNULL, stderr=core.DEVNULL, timeout=180,
+                           creationflags=core.CREATE_NO_WINDOW)
     except Exception:
         pass
-    _unlink_quiet(path)
+    core._unlink_quiet(path)
 
 
 def speak_next():
@@ -503,9 +304,9 @@ def speak_next():
 
 def speak_breaking():
     """Speak the pending breaking-news line (blocking) and clear it. Returns True if it spoke."""
-    if not BREAKING_FILE.exists():
+    if not core.BREAKING_FILE.exists():
         return False
-    _say_file(BREAKING_FILE)
+    _say_file(core.BREAKING_FILE)
     return True
 
 
@@ -516,41 +317,41 @@ def _speak_line(text):
     from rendering to the same WAV / talking over each other.
     """
     text = (text or "").strip()
-    if not text or not DJ_SCRIPT.exists():
+    if not text or not core.DJ_SCRIPT.exists():
         return False
     try:
-        fd = os.open(str(SPEAK_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = os.open(str(core.SPEAK_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(fd)
     except FileExistsError:
         try:
-            stale = (time.time() - SPEAK_LOCK.stat().st_mtime) > 180
+            stale = (time.time() - core.SPEAK_LOCK.stat().st_mtime) > 180
         except Exception:
             stale = True
         if not stale:
             return False                 # another announcement is mid-flight -> skip this one
         try:
-            SPEAK_LOCK.unlink()
-            fd = os.open(str(SPEAK_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            core.SPEAK_LOCK.unlink()
+            fd = os.open(str(core.SPEAK_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
         except Exception:
             return False
     try:
-        subprocess.run([sys.executable, str(DJ_SCRIPT), "say"], input=text.encode("utf-8"),
-                       stdout=DEVNULL, stderr=DEVNULL, timeout=180,
-                       creationflags=CREATE_NO_WINDOW)
+        subprocess.run([sys.executable, str(core.DJ_SCRIPT), "say"], input=text.encode("utf-8"),
+                       stdout=core.DEVNULL, stderr=core.DEVNULL, timeout=180,
+                       creationflags=core.CREATE_NO_WINDOW)
     except Exception:
         pass
     finally:
-        _unlink_quiet(SPEAK_LOCK)
+        core._unlink_quiet(core.SPEAK_LOCK)
     return True
 
 
 def _proc_name(pid):
     """Executable name of a live process, or None if there is no such process."""
     try:
-        if IS_WIN:
+        if core.IS_WIN:
             out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
-                                 capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
+                                 capture_output=True, text=True, creationflags=core.CREATE_NO_WINDOW)
             for row in csv.reader(io.StringIO(out.stdout)):   # exact match on the PID column:
                 if len(row) > 1 and row[1] == str(pid):       # "123" must not match "1234"
                     return row[0]
@@ -585,9 +386,9 @@ def kill(pid, expect=None):
     if not pid or (expect and not alive(pid, expect)):
         return
     try:
-        if IS_WIN:
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=DEVNULL, stderr=DEVNULL,
-                           creationflags=CREATE_NO_WINDOW)
+        if core.IS_WIN:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=core.DEVNULL, stderr=core.DEVNULL,
+                           creationflags=core.CREATE_NO_WINDOW)
         else:
             os.kill(pid, signal.SIGTERM)
     except Exception:
@@ -604,7 +405,7 @@ def _self_exe():
     pause left the music playing and the Stop hook queued nothing. Windows keeps the exe name."""
     global _SELF_EXE
     if _SELF_EXE is None:
-        name = None if IS_WIN else _proc_name(os.getpid())
+        name = None if core.IS_WIN else _proc_name(os.getpid())
         _SELF_EXE = name if name and name != "?" else Path(sys.executable).name
     return _SELF_EXE
 
@@ -640,7 +441,7 @@ def _kill_players_after_daemon(st, now=None):
     pid is still the recorded program, so the stale one is skipped when it has gone.
     Still open: a daemon killed between its player Popen and the state write leaves a player
     that no state names."""
-    now = read_state() if now is None else now
+    now = core.read_state() if now is None else now
     _kill_player(now)
     if (now.get("player_pid"), now.get("player_exe")) != (st.get("player_pid"), st.get("player_exe")):
         _kill_player(st)
@@ -677,7 +478,7 @@ def _win_ffmpeg_tool(name):
     """C:/ffmpeg/bin/<name>.exe when on Windows and present, else None: ffmpeg's Windows builds
     are often unpacked there and never added to PATH."""
     path = Path("C:/ffmpeg/bin") / f"{name}.exe"
-    return str(path) if IS_WIN and path.exists() else None
+    return str(path) if core.IS_WIN and path.exists() else None
 
 
 def detect_player():
@@ -709,8 +510,8 @@ def player_argv(player_path, builder, src, vol, start=0):
 
 # --------------------------------------------------------------------------- sources
 def _read_key():
-    if KEY_FILE.exists():
-        k = KEY_FILE.read_text(encoding="utf-8").strip()
+    if core.KEY_FILE.exists():
+        k = core.KEY_FILE.read_text(encoding="utf-8").strip()
         if k:
             return k
     return os.environ.get("STABILITY_API_KEY", "").strip()
@@ -720,7 +521,7 @@ def _cmdline(parts, call=False):
     """`parts` as one command line to paste: shlex quoting on macOS and Linux; on Windows forward
     slashes, double quotes around a part with a space, and with `call` PowerShell's `&` before a
     quoted program, which PowerShell otherwise reads as a string rather than running it."""
-    if not IS_WIN:
+    if not core.IS_WIN:
         import shlex
         return " ".join(shlex.quote(p) for p in parts)
     parts = [f'"{p}"' if " " in p else p for p in (p.replace("\\", "/") for p in parts)]
@@ -730,14 +531,14 @@ def _cmdline(parts, call=False):
 def _console_python():
     """The Python running now, with pythonw.exe (no console, so no hidden prompt) as python.exe."""
     exe = Path(sys.executable or "python")
-    return str(exe.with_name("python.exe") if IS_WIN and exe.name.lower() == "pythonw.exe" else exe)
+    return str(exe.with_name("python.exe") if core.IS_WIN and exe.name.lower() == "pythonw.exe" else exe)
 
 
 def _self_cmd(*args):
     """A command the user can paste into their own terminal to run this radio.py with the Python
     running now - for `key`, whose hidden prompt needs a real terminal, so a first-time user
     never has to work out which of the plugin's folders holds radio.py or which Python to call."""
-    return _cmdline([_console_python(), str(CODE_DIR / "radio.py")] + list(args), call=True)
+    return _cmdline([_console_python(), str(core.CODE_DIR / "radio.py")] + list(args), call=True)
 
 
 STEP_INDENT = " " * 7          # a step's command, path or address sits on its own line, this far in
@@ -787,12 +588,12 @@ def _install_cmd(program="player", version=PY_INSTALL):
     Python `version`, on this OS. Linux has one command only for the distro's own Python, so any
     other version gets ""."""
     if program == "python":
-        if IS_WIN:
+        if core.IS_WIN:
             return "Python", f"winget install Python.Python.{version}"
         if sys.platform == "darwin":
             return "Python", "brew install python" if version == PY_INSTALL else f"brew install python@{version}"
         return "Python", "sudo apt install python3" if version == PY_INSTALL else ""
-    if IS_WIN:
+    if core.IS_WIN:
         return "FFmpeg", "winget install Gyan.FFmpeg"
     if sys.platform == "darwin":
         return ("mpv", "brew install mpv") if program == "player" else ("FFmpeg", "brew install ffmpeg")
@@ -802,7 +603,7 @@ def _install_cmd(program="player", version=PY_INSTALL):
 def _install_hint():
     """How to install an audio player, in one line, for `play`'s message."""
     name, cmd = _install_cmd()
-    if IS_WIN:
+    if core.IS_WIN:
         return f"install {name} ({cmd}), then restart Claude Code"
     if sys.platform == "darwin":
         return f"install {name} ({cmd})"
@@ -811,7 +612,7 @@ def _install_hint():
 
 def _curl():
     c = shutil.which("curl")
-    if not c and IS_WIN and Path("C:/Windows/System32/curl.exe").exists():
+    if not c and core.IS_WIN and Path("C:/Windows/System32/curl.exe").exists():
         c = "C:/Windows/System32/curl.exe"
     return c
 
@@ -822,7 +623,7 @@ def _curl_run(curl, key, args, timeout=90):
     cfg = f'header = "Authorization: Bearer {key}"\n'
     return subprocess.run([curl, "-sS", "-K", "-"] + list(args), input=cfg,
                           capture_output=True, text=True, timeout=timeout,
-                          creationflags=CREATE_NO_WINDOW)
+                          creationflags=core.CREATE_NO_WINDOW)
 
 
 # Cloudflare fronts api.stability.ai and 403s the default "Python-urllib/x.y"
@@ -846,7 +647,7 @@ def _ssl_context():
 
 def _ca_bundle():
     """The PEM file `stability_api.ca_bundle` names, expanded, when it exists; else ""."""
-    ca = (CONFIG.get("stability_api") or {}).get("ca_bundle") or ""
+    ca = (core.CONFIG.get("stability_api") or {}).get("ca_bundle") or ""
     ca = os.path.expandvars(os.path.expanduser(ca)) if ca else ""
     return ca if ca and Path(ca).exists() else ""
 
@@ -956,7 +757,7 @@ def _poll_result(key, sc, gen_id, dest, timeout=180):
 def _balance(key):
     """Credits left on the Stability account, or None if it can't be read. gen reports its exact
     cost as the drop in this number across the run, rather than a per-track price from memory."""
-    url = CONFIG["stability_api"]["balance_url"]
+    url = core.CONFIG["stability_api"]["balance_url"]
     hdrs = _auth_headers(key, "application/json")
     try:
         with urllib.request.urlopen(urllib.request.Request(url, headers=hdrs), timeout=30,
@@ -1010,7 +811,7 @@ def _wav_to_mp3(wav, mp3):
         r = subprocess.run([exe, "-nostdin", "-y", "-loglevel", "error", "-i", str(wav),
                             "-codec:a", "libmp3lame", "-b:a", MP3_BITRATE, str(mp3)],
                            capture_output=True, text=True, timeout=300,
-                           creationflags=CREATE_NO_WINDOW)
+                           creationflags=core.CREATE_NO_WINDOW)
     except Exception as e:
         return f"ffmpeg failed: {e}"
     if r.returncode != 0 or not mp3.exists() or mp3.stat().st_size == 0:
@@ -1049,7 +850,7 @@ def source_stability_api(prompt, count, duration):
     With output_format 'wav+mp3' it requests a WAV into <library>/_wav and encodes the MP3 that
     plays from it; if the encode fails the WAV moves into the library so the track still plays.
     """
-    sc = CONFIG["stability_api"]
+    sc = core.CONFIG["stability_api"]
     key = _read_key()
     if not key:
         _print_key_help("No API key yet. To add one:")
@@ -1062,10 +863,10 @@ def source_stability_api(prompt, count, duration):
     for i in range(1, count + 1):
         stamp = time.strftime("%Y%m%d-%H%M%S")
         if both:
-            (OUTDIR / WAV_SUBDIR).mkdir(parents=True, exist_ok=True)
-            dest = OUTDIR / WAV_SUBDIR / f"{slug}-{stamp}-{i}.wav"
+            (core.OUTDIR / WAV_SUBDIR).mkdir(parents=True, exist_ok=True)
+            dest = core.OUTDIR / WAV_SUBDIR / f"{slug}-{stamp}-{i}.wav"
         else:
-            dest = OUTDIR / f"{slug}-{stamp}-{i}.{api_fmt}"
+            dest = core.OUTDIR / f"{slug}-{stamp}-{i}.{api_fmt}"
         code, body = _api_post(sc["submit_url"], key, {
             "prompt": prompt, "model": sc["model"], "steps": sc["steps"],
             "duration": duration, "output_format": api_fmt,
@@ -1081,11 +882,11 @@ def source_stability_api(prompt, count, duration):
         submitted += 1
         ok, err = _poll_result(key, sc, gen_id, dest)
         if ok and both:
-            mp3 = OUTDIR / (dest.stem + ".mp3")
+            mp3 = core.OUTDIR / (dest.stem + ".mp3")
             why = _wav_to_mp3(dest, mp3)
             if why:
-                _unlink_quiet(mp3)
-                kept = OUTDIR / dest.name
+                core._unlink_quiet(mp3)
+                kept = core.OUTDIR / dest.name
                 try:
                     dest.replace(kept)
                 except Exception:
@@ -1096,11 +897,11 @@ def source_stability_api(prompt, count, duration):
             else:
                 dest = mp3
         if ok:
-            history_add(prompt, duration, dest.name, idea=GEN_IDEA, source=CONFIG["source"])
+            history_add(prompt, duration, dest.name, idea=GEN_IDEA, source=core.CONFIG["source"])
             made += 1
         else:
             print(f"FAILED ({i}/{count}) {err}")
-            _unlink_quiet(dest)
+            core._unlink_quiet(dest)
     return made, _spent(key, before, submitted)
 
 
@@ -1115,7 +916,7 @@ SOURCES = {
 
 
 # --------------------------------------------------------------------------- prompt enhancement
-LLM_DIR = ROOT / "llm"
+LLM_DIR = core.ROOT / "llm"
 # The llama-cli and model that last gave an answer, written by _llm_run: `setup` counts the enhancer
 # as installed only while that pair is still the one in use, so a model that never answered (a test
 # that timed out, a llama-cli without --single-turn) isn't reported installed.
@@ -1137,8 +938,8 @@ def _clamp_dur(secs):
 # 4B model off its anchors (techno 30s at temp 0.9), so length is pick_duration's job at temp 0.
 # Data directory first: a plugin's own folder is replaced on every update (and old versions are
 # swept), so a tuned prompt kept there would be lost. The copy beside radio.py is the shipped one.
-ENHANCE_USER = ROOT / "prompts" / "enhance.md"
-ENHANCE_SHIPPED = CODE_DIR / "prompts" / "enhance.md"
+ENHANCE_USER = core.ROOT / "prompts" / "enhance.md"
+ENHANCE_SHIPPED = core.CODE_DIR / "prompts" / "enhance.md"
 
 
 def enhance_file():
@@ -1327,7 +1128,7 @@ def _tidy_caption(text, idea):
 
 def _llm_exe():
     """Where llama-cli goes: <data dir>/llm/bin."""
-    return LLM_DIR / "bin" / ("llama-cli.exe" if IS_WIN else "llama-cli")
+    return LLM_DIR / "bin" / ("llama-cli.exe" if core.IS_WIN else "llama-cli")
 
 
 def _llm_paths():
@@ -1355,13 +1156,13 @@ def _llm_run(system, user, temp, n_predict, timeout=180, top_p=None, top_k=None,
              "--simple-io", "--temp", str(temp), "-n", str(n_predict)] + knobs
             + ["-sys", system, "-p", user],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=timeout, creationflags=CREATE_NO_WINDOW).stdout
+            timeout=timeout, creationflags=core.CREATE_NO_WINDOW).stdout
     except Exception:
         return ""
     answer = _strip_cli_chrome(out, user)
     if answer and _llm_answered() != [exe, model]:
         try:
-            _write_json(LLM_ANSWERED, [exe, model])
+            core._write_json(LLM_ANSWERED, [exe, model])
         except OSError:
             pass                                      # setup then offers the test; the answer still counts
     return answer
@@ -1544,7 +1345,7 @@ def pick_duration(prompt):
     stated = _stated_duration(prompt)
     if stated is not None:
         return stated, "as stated", ""
-    default = int(CONFIG["stability_api"]["duration"])
+    default = int(core.CONFIG["stability_api"]["duration"])
     exe, model = _llm_paths()
     if exe and model:
         ans = " ".join(_llm_run(_dur_sys(_clamp_dur(default)),
@@ -1628,9 +1429,9 @@ def cmd_gen(args, decided=None):
               f"first {SA3_PROMPT_TOKENS} - the rest would be dropped without an error. Cut about "
               f"{cut} of its {len(prompt)} characters. Nothing spent.")
         return
-    source = SOURCES.get(CONFIG["source"])
+    source = SOURCES.get(core.CONFIG["source"])
     if not source:
-        print(f"Unknown source '{CONFIG['source']}'. Available: {', '.join(SOURCES)}")
+        print(f"Unknown source '{core.CONFIG['source']}'. Available: {', '.join(SOURCES)}")
         return
     # Output is deliberately four lines (Length / Prompt / Cost / Folder) plus any FAILED lines.
     if duration is None:
@@ -1646,7 +1447,7 @@ def cmd_gen(args, decided=None):
         print("Cost: " + (f"{_fmt_credits(cost)} credits" if cost is not None
                           else "unknown (credit balance unreadable or not updated yet)"))
     total = len(get_library())
-    print(f"Folder: {OUTDIR.name} / track(s) added: {made} / total: {total} "
+    print(f"Folder: {core.OUTDIR.name} / track(s) added: {made} / total: {total} "
           f"track{'' if total == 1 else 's'}")
 
 
@@ -1746,7 +1547,7 @@ def cmd_play(args):
 
 def _play(say=""):
     """Start the daemon, or resume a pause point, with `say` as the DJ sign-on."""
-    st = read_state()
+    st = core.read_state()
     if _is_playing(st):
         if say:                              # spoken before the next track of the live daemon
             queue_add(say, front=True)
@@ -1763,30 +1564,30 @@ def _play(say=""):
         return
     if say:                                  # Claude-written sign-on -> front of the DJ queue
         queue_add(say, front=True)
-    resuming = RESUME_FILE.exists()          # a pause point the daemon will pick up on start
+    resuming = core.RESUME_FILE.exists()          # a pause point the daemon will pick up on start
     argv = [sys.executable, os.path.abspath(__file__), "__daemon"]
-    if IS_WIN:
+    if core.IS_WIN:
         DETACHED_PROCESS = 0x00000008
         CREATE_NEW_PROCESS_GROUP = 0x00000200
         subprocess.Popen(argv, creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-                         stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL, close_fds=True)
+                         stdin=core.DEVNULL, stdout=core.DEVNULL, stderr=core.DEVNULL, close_fds=True)
     else:
         subprocess.Popen(argv, start_new_session=True,
-                         stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL, close_fds=True)
+                         stdin=core.DEVNULL, stdout=core.DEVNULL, stderr=core.DEVNULL, close_fds=True)
     time.sleep(1.0)
-    st = read_state()
+    st = core.read_state()
     verb = "Resumed" if resuming else "Radio started"
     print(f"{verb} (daemon {st.get('daemon_pid')}). Now: {st.get('now_playing')}")
 
 
 def cmd_stop(_args):
-    st = read_state()
+    st = core.read_state()
     _kill_daemon(st)             # stop the loop first so it can't spawn a new player
     _kill_players_after_daemon(st)   # then re-read: a track may have ended during that kill
-    for f in (BREAKING_FILE, RESUME_FILE):   # drop pending interrupt + pause point (fresh shuffle)
-        _unlink_quiet(f)
-    write_state(status="stopped", daemon_pid=None, player_pid=None, now_playing=None)
-    write_now("Terminal FM | stopped")
+    for f in (core.BREAKING_FILE, core.RESUME_FILE):   # drop pending interrupt + pause point (fresh shuffle)
+        core._unlink_quiet(f)
+    core.write_state(status="stopped", daemon_pid=None, player_pid=None, now_playing=None)
+    core.write_now("Terminal FM | stopped")
     print("Radio stopped.")
 
 
@@ -1797,14 +1598,14 @@ def cmd_pause(_args):
     play_track as player_offset + elapsed-since player_started), tear the daemon down like `stop`,
     and leave a resume.json the next daemon replays via a seek offset.
     """
-    st = read_state()
+    st = core.read_state()
     if not _is_playing(st):
         print("Not playing.")
         return
     _kill_daemon(st)             # daemon first so it can't advance/respawn
     # Re-read after the kill: if the track ended meanwhile, the daemon started the next one and
     # recorded it, and the position must come from that player, not the one first read.
-    now = read_state()
+    now = core.read_state()
     track = now.get("now_playing")
     pos = 0.0
     if _player_alive(now):
@@ -1821,7 +1622,7 @@ def cmd_pause(_args):
     saved = False
     if track and pos > 1:
         try:
-            _write_json(RESUME_FILE, {"track": track, "offset": pos})
+            core._write_json(core.RESUME_FILE, {"track": track, "offset": pos})
             saved = True
         except Exception:
             pass
@@ -1832,10 +1633,10 @@ def cmd_pause(_args):
         cmd_stop([])
         print("Paused between tracks, nothing to resume; `radio play` starts a fresh shuffle.")
         return
-    _unlink_quiet(BREAKING_FILE)
-    write_state(status="paused", daemon_pid=None, player_pid=None, now_playing=track)
+    core._unlink_quiet(core.BREAKING_FILE)
+    core.write_state(status="paused", daemon_pid=None, player_pid=None, now_playing=track)
     stem = Path(track).stem if track else ""
-    write_now(f"Terminal FM | paused: {stem}" if stem else "Terminal FM | paused")
+    core.write_now(f"Terminal FM | paused: {stem}" if stem else "Terminal FM | paused")
     where = f"{int(pos) // 60}:{int(pos) % 60:02d}"
     print(f"Paused at {where}"
           + (f" - {stem}" if stem else "")
@@ -1844,7 +1645,7 @@ def cmd_pause(_args):
 
 
 def cmd_skip(_args):
-    st = read_state()
+    st = core.read_state()
     if not _is_playing(st):
         print("Not playing.")
         return
@@ -1856,11 +1657,11 @@ def cmd_skip(_args):
 
 
 def cmd_status(_args):
-    st = read_state()
+    st = core.read_state()
     print("Terminal FM status")
     print(f"  state   : {st.get('status')}")
     print(f"  now     : {st.get('now_playing')}")
-    print(f"  folder  : {OUTDIR}{'' if OUTDIR == DEFAULT_OUTDIR else '  (custom)'}")
+    print(f"  folder  : {core.OUTDIR}{'' if core.OUTDIR == core.DEFAULT_OUTDIR else '  (custom)'}")
     lib = get_library()
     print(f"  library : {len(lib)} track(s)")
     n_arch = len(archived_tracks())
@@ -1869,8 +1670,8 @@ def cmd_status(_args):
     pl = load_playlist()
     print(f"  mode    : {'playlist - ' + str(len(pl)) + ' track(s), in order' if pl else 'shuffle (full library)'}")
     print(f"  queue   : {len(queue_files())} DJ line(s) pending")
-    print(f"  announce: {'on' if CONFIG.get('dj', {}).get('announce_when_idle') else 'off'} (idle updates)")
-    print(f"  source  : {CONFIG['source']}")
+    print(f"  announce: {'on' if core.CONFIG.get('dj', {}).get('announce_when_idle') else 'off'} (idle updates)")
+    print(f"  source  : {core.CONFIG['source']}")
     player, _ = detect_player()
     print(f"  player  : {Path(player).name if player else '(none found)'}")
     print(f"  daemon  : {st.get('daemon_pid')} (alive: {'yes' if _daemon_alive(st) else 'no'})")
@@ -1927,7 +1728,7 @@ def _setup_required():
     """The required steps in order, as (title, done, text): a done title says what was found, and
     text spells out the steps that finish one that isn't."""
     again = "/tfm setup"
-    restart = ["Restart Claude Code."] if IS_WIN else []
+    restart = ["Restart Claude Code."] if core.IS_WIN else []
 
     def install(program):
         name, cmd = _install_cmd(program)
@@ -1945,21 +1746,21 @@ def _setup_required():
     key = _read_key()
     rows.append(("Stability API key: found" if key else "Stability API key", bool(key), _key_help(again)))
     try:
-        seen = HOOK_SEEN.read_text(encoding="utf-8").strip()
+        seen = core.HOOK_SEEN.read_text(encoding="utf-8").strip()
     except Exception:
         seen = ""
-    if IS_WIN and not seen and not _git_bash():
+    if core.IS_WIN and not seen and not _git_bash():
         hooks = [("Install Git for Windows in a terminal (Claude Code runs the hooks with its Git Bash):",
                   "winget install Git.Git")] + restart
     else:
         hooks = ["Start a new Claude Code session: the hooks run when a session starts."]
     rows.append((f"Session hooks: last ran {seen}" if seen else "Session hooks", bool(seen),
                  _steps(hooks, again)))
-    if CONFIG["stability_api"].get("output_format") == BOTH_FORMATS:
+    if core.CONFIG["stability_api"].get("output_format") == BOTH_FORMATS:
         ff = _ffmpeg()
         rows.append(("FFmpeg, for wav+mp3: found" if ff else "FFmpeg, for wav+mp3", bool(ff), install("ffmpeg")))
     n = len(get_library())
-    rows.append((f"Library: {n} track(s) in {OUTDIR.name}" if n else "First track", bool(n),
+    rows.append((f"Library: {n} track(s) in {core.OUTDIR.name}" if n else "First track", bool(n),
                  _steps([("Make one (this spends Stability credits):",
                           '/tfm gen "warm lo-fi hip hop, rhodes, 80 BPM"'), ("Play it:", "/tfm play")])))
     return rows
@@ -2125,7 +1926,7 @@ def _fetch(url, dest, size, sha256, token=None, refused=""):
             answered = _origin(e.url or url)          # after a redirect, the CDN that refused
             msg = f"{answered[1]} answered HTTP {e.code}"
             if e.code == 416:                         # the .part doesn't fit the file: start over
-                _unlink_quiet(part)
+                core._unlink_quiet(part)
                 return f"{msg}. Run the same command again to start the download over"
             if refused and e.code in (401, 403) and answered == _origin(url):
                 return f"{msg}. {refused}"
@@ -2147,7 +1948,7 @@ def _fetch(url, dest, size, sha256, token=None, refused=""):
     if got < size:
         return f"the download stopped at {_size(got)} of {_size(size)}. Run the same command again to continue it"
     if got > size or (digest.hexdigest() if digest else _sha256(part)) != sha256:
-        _unlink_quiet(part)
+        core._unlink_quiet(part)
         return f"{dest.name} didn't match its published SHA-256, so it was deleted"
     os.replace(part, dest)
     return None
@@ -2216,7 +2017,7 @@ def _run(cmd, timeout):
     """(exit code, stdout + stderr) of a helper program, or (None, why it didn't start)."""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, creationflags=CREATE_NO_WINDOW)
+                           timeout=timeout, creationflags=core.CREATE_NO_WINDOW)
         return r.returncode, r.stdout + r.stderr
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
@@ -2224,8 +2025,8 @@ def _run(cmd, timeout):
 
 def _no_room(need):
     """Why `need` more bytes won't fit on the data folder's disk, or None."""
-    free = shutil.disk_usage(ROOT).free
-    return None if free >= need else (f"it needs about {_size(need)} free on the disk with {ROOT},"
+    free = shutil.disk_usage(core.ROOT).free
+    return None if free >= need else (f"it needs about {_size(need)} free on the disk with {core.ROOT},"
                                       f" which has {_size(free)}")
 
 
@@ -2283,15 +2084,15 @@ def _statusline_page(done):
     print("Statusline: the playing track under Claude Code's prompt")
     if done:
         print("Status: done. Your statusline shows the radio.")
-    elif not STATUSLINE_DST.is_file():
+    elif not core.STATUSLINE_DST.is_file():
         print("Status: finish /tfm setup first. The session hooks put statusline.py in place.")
     elif _statusline_state() == "other":
         print("Status: you have your own statusline, and it doesn't show the radio yet.\n")
-        print(_steps([("Have your statusline script print the text of this file:", str(NOW_FILE))]))
+        print(_steps([("Have your statusline script print the text of this file:", str(core.NOW_FILE))]))
         print('  It reads "Terminal FM > <track>" while a track plays and "Terminal FM | <status>"'
               ' otherwise, so ">" means playing.')
     else:
-        cmd = _cmdline([_console_python() if IS_WIN else "python3", str(STATUSLINE_DST)])
+        cmd = _cmdline([_console_python() if core.IS_WIN else "python3", str(core.STATUSLINE_DST)])
         entry = json.dumps({"statusLine": {"type": "command", "command": cmd}})
         settings = _settings_file()
         if settings.is_file():
@@ -2342,7 +2143,7 @@ def _voice_python():
     found = next(dj._side_by_side(), None)
     if found:
         return found
-    if IS_WIN:      # Python313, or with a suffix: 32-bit and ARM64 installs add one (not tried on those)
+    if core.IS_WIN:      # Python313, or with a suffix: 32-bit and ARM64 installs add one (not tried on those)
         home = Path(os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python"))
         found = sorted(home.glob("Python%d%d*/python.exe" % dj.PY_VOICE_MAX))
         return str(found[0]) if found else None
@@ -2355,7 +2156,7 @@ def _python_getter():
     """The program that installs the voice's Python for this user: winget on Windows (its App
     Installer link too, which Claude Code's shells may not have on PATH), Homebrew on macOS. None
     elsewhere, or when it isn't installed."""
-    if IS_WIN:
+    if core.IS_WIN:
         alias = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe")
         return shutil.which("winget") or (alias if os.path.isfile(alias) else None)
     if sys.platform == "darwin":
@@ -2371,9 +2172,9 @@ def _get_python():
     ver = "%d.%d" % dj.PY_VOICE_MAX
     tool = _python_getter()
     if not tool:                                      # the plan doesn't offer this step without one
-        return f"{'winget' if IS_WIN else 'Homebrew'} isn't installed: install Python {ver} yourself, then run this again"
+        return f"{'winget' if core.IS_WIN else 'Homebrew'} isn't installed: install Python {ver} yourself, then run this again"
     cmd = [tool] + _install_cmd("python", ver)[1].split()[1:]
-    if IS_WIN:
+    if core.IS_WIN:
         cmd += ["-e", "--scope", "user", "--silent", "--accept-package-agreements",
                 "--accept-source-agreements", "--disable-interactivity"]
     _, out = _run(cmd, 900)
@@ -2402,7 +2203,7 @@ def _pip_voice():
     code, out = _run([py, "-m", "pip", "--disable-pip-version-check", "-q"] + shlex.split(KOKORO_PIP_ARGS), 900)
     if code != 0:
         return f"pip failed ({dj.last_line(out)})"
-    _atomic_write(dj.KOKORO_PY_CACHE, py)             # the DJ's interpreter from now on
+    core._atomic_write(dj.KOKORO_PY_CACHE, py)             # the DJ's interpreter from now on
     return None
 
 
@@ -2419,7 +2220,7 @@ def _voice_check():
         with wave.open(str(wav), "rb") as w:
             return None if w.getnframes() else "the test line came out empty"
     finally:
-        _unlink_quiet(wav)
+        core._unlink_quiet(wav)
 
 
 def _voice_todo():
@@ -2436,12 +2237,12 @@ def _voice_todo():
         base, ver = _voice_python(), "%d.%d" % dj.PY_VOICE_MAX
         if not base:
             need = "the voice needs Python %d.%d to %s, and none was found" % (*dj.PY_VOICE_MIN, ver)
-            get = _install_cmd("python", ver)[1] if IS_WIN or sys.platform == "darwin" else ""
+            get = _install_cmd("python", ver)[1] if core.IS_WIN or sys.platform == "darwin" else ""
             if not get:
                 return None, (f"not possible here: {need}. Install one with your package manager, then run"
                               " /tfm setup voice again.")
             if not _python_getter():
-                tool, other = (("winget", "App Installer from the Microsoft Store, which brings winget") if IS_WIN
+                tool, other = (("winget", "App Installer from the Microsoft Store, which brings winget") if core.IS_WIN
                                else ("Homebrew", "Homebrew from https://brew.sh"))
                 return None, (f"not possible here: {need}, and {tool}, which would install it, isn't on this"
                               f" computer. Install Python {ver} from https://www.python.org/downloads/, or"
@@ -2490,7 +2291,7 @@ def _voice_pip_steps():
                else " with your system's package manager, if you don't have it.")
         steps = [(f"Its Python packages need Python {top} or older, and this is Python"
                   f" {sys.version.split()[0]}. Install Python {top}{how}", get)]
-        pip = (f"py -{top}" if IS_WIN else f"python{top}") + " -m pip"
+        pip = (f"py -{top}" if core.IS_WIN else f"python{top}") + " -m pip"
         title = "Install the packages with it:"
     return steps + [(title, f"{pip} {KOKORO_PIP_ARGS}")]
 
@@ -2552,7 +2353,7 @@ def _get_llama(name, size, sha256):
         bin_dir.mkdir(exist_ok=True)
         for f in sorted(new.iterdir(), key=lambda p: p.name == exe.name):
             os.replace(f, bin_dir / f.name)
-        _unlink_quiet(archive)
+        core._unlink_quiet(archive)
         return None
     finally:
         shutil.rmtree(new, ignore_errors=True)
@@ -2797,15 +2598,15 @@ def cmd_announce(args):
         return
     sub = (args[0].lower() if args else "status")
     if sub in _ON_WORDS:
-        set_config("dj", "announce_when_idle", True)
+        core.set_config("dj", "announce_when_idle", True)
         print("DJ idle announcements: ON")
         print("  Claude will get a short spoken update when it finishes a turn, even with music stopped.")
     elif sub in _OFF_WORDS:
-        set_config("dj", "announce_when_idle", False)
+        core.set_config("dj", "announce_when_idle", False)
         print("DJ idle announcements: OFF")
     else:
-        cur = bool(CONFIG.get("dj", {}).get("announce_when_idle", False))
-        brk = bool(CONFIG.get("dj", {}).get("breaking_news", False))
+        cur = bool(core.CONFIG.get("dj", {}).get("announce_when_idle", False))
+        brk = bool(core.CONFIG.get("dj", {}).get("breaking_news", False))
         print(f"DJ idle announcements: {'ON' if cur else 'OFF'}")
         print(f"DJ breaking news    : {'ON' if brk else 'OFF'}")
         print("  Toggle with:  radio announce on|off   |   radio announce breaking on|off")
@@ -2815,15 +2616,15 @@ def cmd_breaking(args):
     """Toggle breaking-news mode: interrupt the playing track to speak an update, then resume it."""
     sub = (args[0].lower() if args else "status")
     if sub in _ON_WORDS:
-        set_config("dj", "breaking_news", True)
+        core.set_config("dj", "breaking_news", True)
         print("DJ breaking news: ON")
         print("  When Claude finishes a turn, the current track is interrupted for the spoken")
         print("  update, then resumes where it left off (mpv/ffplay/cvlc seek; others restart).")
     elif sub in _OFF_WORDS:
-        set_config("dj", "breaking_news", False)
+        core.set_config("dj", "breaking_news", False)
         print("DJ breaking news: OFF (updates just queue between tracks).")
     else:
-        cur = bool(CONFIG.get("dj", {}).get("breaking_news", False))
+        cur = bool(core.CONFIG.get("dj", {}).get("breaking_news", False))
         print(f"DJ breaking news: {'ON' if cur else 'OFF'}")
         print("  Toggle with:  radio breaking on   |   radio breaking off")
 
@@ -2919,20 +2720,20 @@ def _install_statusline():
     a statusLine setting can point at <data dir>/statusline.py across plugin updates. Skipped
     when the two are the same file (a clone run in place as the data directory). Never raises."""
     try:
-        if not STATUSLINE_SRC.is_file():
+        if not core.STATUSLINE_SRC.is_file():
             return
-        if STATUSLINE_DST.exists() and os.path.samefile(STATUSLINE_SRC, STATUSLINE_DST):
+        if core.STATUSLINE_DST.exists() and os.path.samefile(core.STATUSLINE_SRC, core.STATUSLINE_DST):
             return
-        data = STATUSLINE_SRC.read_bytes()
-        if STATUSLINE_DST.is_file() and STATUSLINE_DST.read_bytes() == data:
+        data = core.STATUSLINE_SRC.read_bytes()
+        if core.STATUSLINE_DST.is_file() and core.STATUSLINE_DST.read_bytes() == data:
             return
-        ROOT.mkdir(parents=True, exist_ok=True)
-        tmp = STATUSLINE_DST.with_name(f"{STATUSLINE_DST.name}.{os.getpid()}.tmp")
+        core.ROOT.mkdir(parents=True, exist_ok=True)
+        tmp = core.STATUSLINE_DST.with_name(f"{core.STATUSLINE_DST.name}.{os.getpid()}.tmp")
         try:
             tmp.write_bytes(data)
-            os.replace(tmp, STATUSLINE_DST)
+            os.replace(tmp, core.STATUSLINE_DST)
         finally:
-            _unlink_quiet(tmp)                      # still there only when a step was refused
+            core._unlink_quiet(tmp)                      # still there only when a step was refused
     except Exception:
         pass
 
@@ -2957,16 +2758,16 @@ def cmd_hook(args):
     if not finished:
         _install_statusline()
         try:                                       # lets `radio setup` tell whether hooks run at all
-            _atomic_write(HOOK_SEEN, time.strftime("%Y-%m-%d %H:%M"))
+            core._atomic_write(core.HOOK_SEEN, time.strftime("%Y-%m-%d %H:%M"))
         except Exception:
             pass
-    st = read_state()
+    st = core.read_state()
     playing = _is_playing(st)
-    announce_idle = bool(CONFIG.get("dj", {}).get("announce_when_idle", False))
-    breaking = bool(CONFIG.get("dj", {}).get("breaking_news", False)) and finished
+    announce_idle = bool(core.CONFIG.get("dj", {}).get("announce_when_idle", False))
+    breaking = bool(core.CONFIG.get("dj", {}).get("breaking_news", False)) and finished
 
     if playing:
-        if BREAKING_FILE.exists():                # an interrupt is already pending -> don't stack
+        if core.BREAKING_FILE.exists():                # an interrupt is already pending -> don't stack
             return
         if not breaking and len(queue_files()) >= 4:   # cap the between-track queue (not breaking)
             return
@@ -3001,7 +2802,7 @@ def cmd_hook(args):
     if playing:
         if breaking:                             # cut the current track, speak now, then resume it
             try:
-                BREAKING_FILE.write_text(line, encoding="utf-8")
+                core.BREAKING_FILE.write_text(line, encoding="utf-8")
             except Exception:
                 return
             _kill_player(st)                     # daemon's wait() returns -> speaks + resumes track
@@ -3021,16 +2822,16 @@ def cmd_hook(args):
 def cmd_list(_args):
     lib = get_library()
     if not lib:
-        print(f"Library is empty ({OUTDIR}).")
+        print(f"Library is empty ({core.OUTDIR}).")
         return
     try:                                    # snapshot the order so `play <numbers>` maps to this list
-        _write_json(LIST_FILE, [t.name for t in lib])
+        core._write_json(core.LIST_FILE, [t.name for t in lib])
     except Exception:
         pass
     pl = load_playlist()
     in_pl = {p.name for p in pl} if pl else set()
     width = len(str(len(lib)))
-    print(f"Library ({len(lib)} tracks) in {OUTDIR}:")
+    print(f"Library ({len(lib)} tracks) in {core.OUTDIR}:")
     for i, t in enumerate(lib, 1):
         mark = " *" if t.name in in_pl else "  "
         print(f"  {str(i).rjust(width)}.{mark} {t.stem}")
@@ -3043,7 +2844,7 @@ def _start_or_jump(say=""):
     """After changing the playlist: if the daemon is live, jump to the new order now (kill the
     player so it advances and re-reads); otherwise start playback. `say` is a `play --say`
     sign-on, spoken before the selection's first track either way."""
-    st = read_state()
+    st = core.read_state()
     if _is_playing(st):
         if say:
             queue_add(say, front=True)
@@ -3085,7 +2886,7 @@ def cmd_playlist(args, say=""):
         return
     tracks = [snap[i - 1] for i in idx]
     try:
-        _write_json(PLAYLIST_FILE, [t.name for t in tracks])
+        core._write_json(core.PLAYLIST_FILE, [t.name for t in tracks])
     except Exception as e:
         print(f"Could not save playlist: {e}")
         return
@@ -3096,11 +2897,11 @@ def cmd_playlist(args, say=""):
 
 
 def cmd_shuffle(_args):
-    existed = PLAYLIST_FILE.exists()
-    _unlink_quiet(PLAYLIST_FILE)
+    existed = core.PLAYLIST_FILE.exists()
+    core._unlink_quiet(core.PLAYLIST_FILE)
     print("Playlist cleared - back to full-library shuffle." if existed
           else "Already on full-library shuffle.")
-    st = read_state()                       # if playing, leave the playlist track and reshuffle
+    st = core.read_state()                       # if playing, leave the playlist track and reshuffle
     if existed and _is_playing(st) and _player_alive(st):
         _kill_player(st)
 
@@ -3109,7 +2910,7 @@ def cmd_format(args):
     """Show or set the file type gen saves new tracks as (config.json stability_api.output_format).
     Existing tracks are untouched, and the library plays both types. wav+mp3 (either order) keeps
     a WAV master in <library>/_wav beside the MP3 that plays, and needs ffmpeg for the encode."""
-    cur = CONFIG["stability_api"]["output_format"]
+    cur = core.CONFIG["stability_api"]["output_format"]
     if not args:
         print(f"Output format: {cur}   (change: radio format {' | '.join(FORMAT_CHOICES)})")
         return
@@ -3120,13 +2921,13 @@ def cmd_format(args):
         print(f"Unknown format '{args[0]}'. Use: radio format {' | '.join(FORMAT_CHOICES)}")
         return
     if fmt == BOTH_FORMATS and not _ffmpeg():
-        where = " or in C:\\ffmpeg\\bin" if IS_WIN else ""
+        where = " or in C:\\ffmpeg\\bin" if core.IS_WIN else ""
         print(f"wav+mp3 needs ffmpeg to make the MP3, and it wasn't found on PATH{where}. Not saved.")
         return
-    set_config("stability_api", "output_format", fmt)
+    core.set_config("stability_api", "output_format", fmt)
     if fmt == BOTH_FORMATS:
         print(f"Output format: {fmt}   (new tracks play as .mp3; the .wav master is kept in "
-              f"{OUTDIR.name}/{WAV_SUBDIR})")
+              f"{core.OUTDIR.name}/{WAV_SUBDIR})")
     else:
         print(f"Output format: {fmt}   (new tracks save as .{fmt})")
 
@@ -3137,7 +2938,7 @@ def _stdin_is_console():
     try:
         if not (sys.stdin and sys.stdin.isatty()):
             return False
-        if not IS_WIN:
+        if not core.IS_WIN:
             return True
         import ctypes
         import msvcrt
@@ -3160,7 +2961,7 @@ def cmd_key(args):
     sub = args[0].lower() if args else ""
     if sub == "show":
         k = _read_key()
-        src = ".key file" if KEY_FILE.exists() and KEY_FILE.read_text(encoding="utf-8").strip() \
+        src = ".key file" if core.KEY_FILE.exists() and core.KEY_FILE.read_text(encoding="utf-8").strip() \
             else ("STABILITY_API_KEY" if k else "none")
         env = "set" if os.environ.get("STABILITY_API_KEY", "").strip() else "not set"
         # Security: say whether there is a key, never print any of it. This output ends up in
@@ -3172,8 +2973,8 @@ def cmd_key(args):
         return
     if sub in ("clear", "delete", "remove"):
         try:
-            KEY_FILE.unlink()
-            print(f"Removed {KEY_FILE}.")
+            core.KEY_FILE.unlink()
+            print(f"Removed {core.KEY_FILE}.")
         except FileNotFoundError:
             print("No stored key.")
         return
@@ -3196,8 +2997,8 @@ def cmd_key(args):
     if not k:
         print("Nothing entered; key unchanged.")
         return
-    _write_private(KEY_FILE, k)
-    print(f"Key saved to {KEY_FILE}.")
+    core._write_private(core.KEY_FILE, k)
+    print(f"Key saved to {core.KEY_FILE}.")
 
 
 def cmd_folder(args):
@@ -3209,16 +3010,16 @@ def cmd_folder(args):
     """
     if not args:
         n = len(get_library())
-        kind = "default" if OUTDIR == DEFAULT_OUTDIR else "custom"
-        print(f"Library folder: {OUTDIR}  ({kind})")
+        kind = "default" if core.OUTDIR == core.DEFAULT_OUTDIR else "custom"
+        print(f"Library folder: {core.OUTDIR}  ({kind})")
         print(f"  {n} track(s)")
         print("Change with:  radio folder <path>   |   radio folder default")
         return
     target = " ".join(args).strip().strip('"').strip("'")
     if target.lower() in ("default", "reset", "clear", "none"):
-        new, value = DEFAULT_OUTDIR, ""
+        new, value = core.DEFAULT_OUTDIR, ""
     else:
-        new, value = resolve_outdir({"library_dir": target}), target
+        new, value = core.resolve_outdir({"library_dir": target}), target
     # Create first, save second: a path that can't be created must never reach config.json, where
     # it would break every later command at import.
     try:
@@ -3226,24 +3027,24 @@ def cmd_folder(args):
     except OSError as e:
         print(f"Not saved: could not create {new}: {e}")
         return
-    set_config(None, "library_dir", value)
+    core.set_config(None, "library_dir", value)
     n = len(_audio_in(new))
     print(f"Library folder set to: {new}")
     print(f"  {n} track(s) found")
     if n == 0:
         print('  Empty - generate tracks (radio gen "<prompt>") or drop .mp3 / .wav files in.')
-    if _is_playing(read_state()):
+    if _is_playing(core.read_state()):
         print("  Note: restart playback to pick up the new folder:  radio stop  then  radio play")
 
 
 def _on_air(nothing_msg):
     """(track path, name) for the track on air, or None after printing why there is none."""
-    st = read_state()
+    st = core.read_state()
     name = st.get("now_playing")
     if st.get("status") != "playing" or not name:
         print(nothing_msg)
         return None
-    track = OUTDIR / name
+    track = core.OUTDIR / name
     if not track.exists():
         print(f"Current track is not in the library folder: {name}")
         return None
@@ -3255,12 +3056,12 @@ def _archive_paths(tracks, playing_name, dest_dir=None, label="archived"):
     playlist. If one of them is on air, the player is killed first so the file isn't locked and the
     daemon moves on to the next track."""
     if playing_name and any(t.name == playing_name for t in tracks):
-        st = read_state()
+        st = core.read_state()
         if _player_alive(st):
             _kill_player(st)            # daemon's wait() returns -> it advances past the moved track
     moved = []
     for t in tracks:
-        dest = _move_track(t, dest_dir or ARCHIVE_DIR)
+        dest = _move_track(t, dest_dir or core.ARCHIVE_DIR)
         if dest:
             moved.append(t.name)
             print(f"  {label}: {t.stem}")
@@ -3283,16 +3084,16 @@ def cmd_archive(args):
     if sub == "list":                       # cmd_list also snapshots the order for the numbers below
         cmd_list([])
         n = len(archived_tracks())
-        print(f"\nArchive: {n} track(s) in {ARCHIVE_DIR}")
+        print(f"\nArchive: {n} track(s) in {core.ARCHIVE_DIR}")
         print("  Archive some with:  radio archive 1,3,5-8      (put back: radio unarchive)")
         return
 
     if sub in ("show", "archived", "ls"):
         arch = archived_tracks()
         if not arch:
-            print(f"Archive is empty ({ARCHIVE_DIR}).")
+            print(f"Archive is empty ({core.ARCHIVE_DIR}).")
             return
-        print(f"Archived ({len(arch)} tracks) in {ARCHIVE_DIR}:")
+        print(f"Archived ({len(arch)} tracks) in {core.ARCHIVE_DIR}:")
         for i, t in enumerate(arch, 1):
             print(f"  {i}. {t.stem}")
         print("Put one back with:  radio unarchive 1")
@@ -3325,8 +3126,8 @@ def cmd_archive(args):
     if not tracks:
         print("Those tracks are no longer in the library.")
         return
-    moved = _archive_paths(tracks, read_state().get("now_playing"))
-    print(f"Archived {len(moved)} track(s) -> {ARCHIVE_DIR}")
+    moved = _archive_paths(tracks, core.read_state().get("now_playing"))
+    print(f"Archived {len(moved)} track(s) -> {core.ARCHIVE_DIR}")
     print(f"Library now has {len(get_library())} track(s). Put them back with: radio unarchive")
 
 
@@ -3341,12 +3142,12 @@ def cmd_drop(args):
     if not on_air:
         return
     track, name = on_air
-    if track.parent.resolve() == BAD_DIR.resolve():
-        print(f"Already in {BAD_DIR.name} (it's the folder playing now): {track.stem}\n"
+    if track.parent.resolve() == core.BAD_DIR.resolve():
+        print(f"Already in {core.BAD_DIR.name} (it's the folder playing now): {track.stem}\n"
               f"Use `radio archive` or `radio skip` instead.")
         return
     print(f"Dropping the current track: {track.stem}")
-    if _archive_paths([track], name, BAD_DIR, f"moved to {BAD_DIR.name}"):
+    if _archive_paths([track], name, core.BAD_DIR, f"moved to {core.BAD_DIR.name}"):
         print("Skipped to the next track.")
 
 
@@ -3359,15 +3160,15 @@ def cmd_unarchive(args):
     """
     arch = archived_tracks()
     if not arch:
-        print(f"Archive is empty ({ARCHIVE_DIR}).")
+        print(f"Archive is empty ({core.ARCHIVE_DIR}).")
         return
 
     if not args:                            # snapshot so the numbers below stay stable
         try:
-            _write_json(ARCHIVE_LIST_FILE, [t.name for t in arch])
+            core._write_json(core.ARCHIVE_LIST_FILE, [t.name for t in arch])
         except Exception:
             pass
-        print(f"Archived ({len(arch)} tracks) in {ARCHIVE_DIR}:")
+        print(f"Archived ({len(arch)} tracks) in {core.ARCHIVE_DIR}:")
         for i, t in enumerate(arch, 1):
             print(f"  {i}. {t.stem}")
         print("\nRestore with:  radio unarchive 1,3      (everything: radio unarchive all)")
@@ -3379,7 +3180,7 @@ def cmd_unarchive(args):
         if not looks_like_selection(args):
             print("Give numbers from `radio unarchive`, e.g.  radio unarchive 1,3")
             return
-        snap = _saved_order(ARCHIVE_LIST_FILE, ARCHIVE_DIR) or arch   # the order the user was shown
+        snap = _saved_order(core.ARCHIVE_LIST_FILE, core.ARCHIVE_DIR) or arch   # the order the user was shown
         idx = parse_selection(args, len(snap))
         if not idx:
             print(f"No valid numbers (archive has {len(snap)}). Run `radio unarchive` to see them.")
@@ -3388,7 +3189,7 @@ def cmd_unarchive(args):
 
     restored = 0
     for t in picks:
-        if _move_track(t, OUTDIR):
+        if _move_track(t, core.OUTDIR):
             print(f"  restored: {t.stem}")
             restored += 1
     print(f"Restored {restored} track(s). Library now has {len(get_library())} track(s).")
@@ -3407,7 +3208,7 @@ def cmd_prompts(args):
     """
     recs = history_all()
     if not recs:
-        print(f"No prompt history yet ({HISTORY_FILE.name}).")
+        print(f"No prompt history yet ({core.HISTORY_FILE.name}).")
         print('  It fills up automatically: every `radio gen` / `radio egen` track, and every'
               '\n  `radio enhance` rewrite even though that generates nothing.')
         return
@@ -3431,7 +3232,7 @@ def cmd_prompts(args):
         else:
             print(f"  file      : {rec.get('file', '?')}  ({_history_where(rec)})")
         print(f"\nMake another like it:\n  radio gen \"{rec.get('prompt', '')}\" 1 "
-              f"{rec.get('duration') or CONFIG['stability_api']['duration']}")
+              f"{rec.get('duration') or core.CONFIG['stability_api']['duration']}")
         return
 
     show_all = arg.lower() == "all"
@@ -3471,11 +3272,11 @@ def cmd_prompts(args):
 def _take_resume():
     """Consume a pause point written by `radio pause`. Returns (track_path, offset_seconds) or None."""
     try:
-        if not RESUME_FILE.exists():
+        if not core.RESUME_FILE.exists():
             return None
-        r = json.loads(RESUME_FILE.read_text(encoding="utf-8"))
-        RESUME_FILE.unlink()
-        t = OUTDIR / str(r.get("track", ""))
+        r = json.loads(core.RESUME_FILE.read_text(encoding="utf-8"))
+        core.RESUME_FILE.unlink()
+        t = core.OUTDIR / str(r.get("track", ""))
         off = float(r.get("offset", 0) or 0)
         if t.exists() and off > 1:
             return (t, off)
@@ -3491,26 +3292,26 @@ def play_track(track, player, builder, vol, start_at=0):
     resume_at = start_at
     while True:
         count = len(get_library())
-        write_now(f"Terminal FM > {track.stem}  ({count} tracks)")
+        core.write_now(f"Terminal FM > {track.stem}  ({count} tracks)")
         started = time.time()
         try:
             proc = subprocess.Popen(
                 player_argv(player, builder, str(track), vol, resume_at),
-                stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL,
-                creationflags=CREATE_NO_WINDOW)
+                stdin=core.DEVNULL, stdout=core.DEVNULL, stderr=core.DEVNULL,
+                creationflags=core.CREATE_NO_WINDOW)
         except Exception:
             time.sleep(1)
             return
-        write_state(status="playing", daemon_pid=os.getpid(), daemon_exe=_self_exe(),
+        core.write_state(status="playing", daemon_pid=os.getpid(), daemon_exe=_self_exe(),
                     player_pid=proc.pid, player_exe=PLAYER_PROCESS.get(Path(player).name, Path(player).name),
                     now_playing=track.name, player_started=started, player_offset=resume_at)
         proc.wait()
         # Breaking news: the hook wrote a line + killed the player mid-track. Speak it now (music
         # paused), then resume THIS track where it left off. No file -> ended naturally, or was
         # skipped/paused -> return so the daemon advances (or exits, if paused killed the daemon).
-        if BREAKING_FILE.exists():
+        if core.BREAKING_FILE.exists():
             resume_at += time.time() - started
-            write_now("Terminal FM | breaking news...")
+            core.write_now("Terminal FM | breaking news...")
             speak_breaking()
             continue
         return
@@ -3519,12 +3320,12 @@ def play_track(track, player, builder, vol, start_at=0):
 def daemon_loop():
     player, builder = detect_player()
     if not player:
-        write_now("Terminal FM | no audio player found")
+        core.write_now("Terminal FM | no audio player found")
         return
-    vol = int(CONFIG.get("volume", 85))
-    write_state(status="playing", daemon_pid=os.getpid(), daemon_exe=_self_exe(),
+    vol = int(core.CONFIG.get("volume", 85))
+    core.write_state(status="playing", daemon_pid=os.getpid(), daemon_exe=_self_exe(),
                 player_pid=None, now_playing=None)
-    write_now("Terminal FM | on air")
+    core.write_now("Terminal FM | on air")
     resume_first = _take_resume()   # (track, offset) from a pause -> play it first, mid-track
     shuffle_queue = []              # remaining shuffled tracks (shuffle mode)
     pl_pos = 0                      # cursor within the active playlist
@@ -3534,7 +3335,7 @@ def daemon_loop():
     while True:
         lib = get_library()
         if not lib:
-            write_now('Terminal FM | no tracks - run: radio gen "your prompt"')
+            core.write_now('Terminal FM | no tracks - run: radio gen "your prompt"')
             time.sleep(5)
             continue
 

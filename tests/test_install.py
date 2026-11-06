@@ -21,7 +21,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import HF_VARS, SetupCase, on_os, patch, radio, reset_home, run
+from radio_test_support import HF_VARS, SetupCase, core, on_os, patch, radio, reset_home, run
 
 import dj  # noqa: E402  (after radio_test_support, which points TERMINAL_FM_HOME at the test home)
 
@@ -76,7 +76,7 @@ class Fetch(unittest.TestCase):
         self.httpd.routes.clear()
         self.httpd.seen.clear()
         self.body = os.urandom(300_000)
-        self.dest = radio.ROOT / "dl" / "file.bin"
+        self.dest = core.ROOT / "dl" / "file.bin"
         self.part = self.dest.with_name("file.bin.part")
 
     def fetch(self, route, **kw):
@@ -180,9 +180,9 @@ class Fetch(unittest.TestCase):
 
     def test_downloads_trust_the_system_and_the_bundle(self):
         # ca_bundle may hold only the API's chain: a download must still verify GitHub and Hugging Face.
-        pem = radio.ROOT / "only-the-api.pem"
+        pem = core.ROOT / "only-the-api.pem"
         pem.write_text("not read: the context is mocked", encoding="utf-8")
-        with mock.patch.dict(radio.CONFIG["stability_api"], ca_bundle=str(pem)), \
+        with mock.patch.dict(core.CONFIG["stability_api"], ca_bundle=str(pem)), \
                 mock.patch.object(radio.ssl, "create_default_context") as make:
             radio._download_context()
         make.assert_called_once_with()                                 # the system's certificates...
@@ -211,8 +211,8 @@ class Fetch(unittest.TestCase):
                 err = self.fetch(("file", self.body))
                 self.assertIn(want, err)
                 self.assertEqual("Run the same command again" in err, "Run the same" in want)
-        pem = radio.ROOT / "isrg.pem"                  # named only when it exists, so it was the one used
-        with mock.patch.dict(radio.CONFIG["stability_api"], ca_bundle=str(pem)), \
+        pem = core.ROOT / "isrg.pem"                  # named only when it exists, so it was the one used
+        with mock.patch.dict(core.CONFIG["stability_api"], ca_bundle=str(pem)), \
                 mock.patch.object(radio, "_download_context", return_value=ssl.create_default_context()), \
                 mock.patch.object(urllib.request.OpenerDirector, "open", side_effect=cert):
             self.assertNotIn("ca_bundle", self.fetch(("file", self.body)))
@@ -392,7 +392,7 @@ class InstallRunner(unittest.TestCase):
 
     def test_a_stopped_download_needs_room_only_for_the_rest(self):
         # A full disk stopped it at 2.4 of 2.5 GB: the rerun must fit in what is still to come.
-        dest = radio.ROOT / "dl" / "big.bin"
+        dest = core.ROOT / "dl" / "big.bin"
         dest.parent.mkdir(parents=True)
         self.assertEqual(radio._still_to_fetch(dest, 1000), 1000)
         radio._part(dest).write_bytes(b"x" * 900)
@@ -467,7 +467,7 @@ class Plans(SetupCase):
             self.assertEqual([what for what, _, _ in radio._voice_todo()[0]],
                              ["voices-v1.0.bin (1 MB) from github.com, replacing the file there, which is the wrong size",
                               "a test line, rendered but not played"])
-            py = radio.ROOT / "py.exe"                                 # the DJ's interpreter has spoken a line
+            py = core.ROOT / "py.exe"                                 # the DJ's interpreter has spoken a line
             py.write_bytes(b"")
             for f in (dj.KOKORO_PY_CACHE, dj.KOKORO_RENDERED):
                 f.write_text(str(py), encoding="utf-8")
@@ -479,14 +479,14 @@ class Plans(SetupCase):
             self.assertEqual(radio._kokoro_missing(), [fp16.name])
 
     def test_a_pinned_dj_python_without_the_packages_stops_the_plan(self):
-        pinned = radio.ROOT / "pinned-python.exe"
+        pinned = core.ROOT / "pinned-python.exe"
         pinned.write_bytes(b"")
-        radio.set_config("dj", "python", str(pinned))
+        core.set_config("dj", "python", str(pinned))
         steps, why = radio._voice_todo()
         self.assertIsNone(steps)
         self.assertIn(f"dj.python in config.json names {pinned}, which the DJ always uses", why)
         self.assertIn("Install kokoro-onnx 0.6 or newer and soundfile in that Python, or remove dj.python", why)
-        radio.set_config("dj", "python", str(radio.ROOT / "gone.exe"))   # missing: dj.py doesn't use it either
+        core.set_config("dj", "python", str(core.ROOT / "gone.exe"))   # missing: dj.py doesn't use it either
         self.assertIsNotNone(radio._voice_todo()[0])
 
     def test_any_of_the_three_models_will_do(self):
@@ -617,14 +617,14 @@ class Plans(SetupCase):
         for name, (size, _) in radio.KOKORO_PINS.items():
             with open(dj.KOKORO_DIR / name, "wb") as f:
                 f.truncate(size)                                         # whole, sparse where it can be
-        py = radio.ROOT / "py.exe"
+        py = core.ROOT / "py.exe"
         py.write_bytes(b"")
         dj.KOKORO_PY_CACHE.write_text(str(py), encoding="utf-8")
         with mock.patch.object(radio.subprocess, "run", side_effect=AssertionError("started a program")):  # dj's too
             self.assertFalse(voice.installed())                          # no line spoken yet
             dj.KOKORO_RENDERED.write_text(str(py), encoding="utf-8")
             self.assertTrue(voice.installed())
-            dj.KOKORO_PY_CACHE.write_text(str(radio.ROOT / "other.exe"), encoding="utf-8")
+            dj.KOKORO_PY_CACHE.write_text(str(core.ROOT / "other.exe"), encoding="utf-8")
             self.assertFalse(voice.installed())                          # the DJ now tries another first
         patch(self, "_voice_ready", return_value=str(py))
         self.assertIn("are here, but the voice hasn't spoken a line with them yet", run(radio._voice_page, False)[1])
@@ -663,7 +663,7 @@ class Plans(SetupCase):
         out = run(radio._tokenizer_page, False)[1]
         self.assertIn("Automatic install: it needs your Hugging Face login, and none was found", out)
         self.assertNotIn("(/tfm setup tokenizer install)", out)
-        self.assertIn(str(radio.ROOT / "no-login"), out)               # where to save one
+        self.assertIn(str(core.ROOT / "no-login"), out)               # where to save one
 
     def test_a_login_is_used_but_never_printed(self):
         os.environ["HF_TOKEN"] = "hf_secret_test_value"
@@ -752,7 +752,7 @@ class VoicePython(unittest.TestCase):
             if self.frames is None:
                 dj._kokoro_error = "rc=1 (C:/venv/python.exe) RuntimeError: boom"
                 return None
-            out = radio.ROOT / "_dj_1.wav"
+            out = core.ROOT / "_dj_1.wav"
             with wave.open(str(out), "wb") as w:
                 w.setnchannels(1)
                 w.setsampwidth(2)
@@ -766,7 +766,7 @@ class VoicePython(unittest.TestCase):
             self.assertEqual(radio._voice_check(), "the test line came out empty")
             self.frames = None
             self.assertEqual(radio._voice_check(), "the test line failed: rc=1 (C:/venv/python.exe) RuntimeError: boom")
-        self.assertEqual(list(radio.ROOT.glob("_dj_*.wav")), [])          # never left behind
+        self.assertEqual(list(core.ROOT.glob("_dj_*.wav")), [])          # never left behind
 
     def test_pip_makes_the_environment_the_djs_python(self):
         patch(self, "_run", return_value=(0, ""))
@@ -777,18 +777,18 @@ class VoicePython(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "%LOCALAPPDATA% paths expand only on Windows")
     def test_wingets_python_is_found_whatever_its_folder_suffix(self):
-        found = radio.ROOT / "Programs" / "Python" / "Python399-arm64" / "python.exe"
+        found = core.ROOT / "Programs" / "Python" / "Python399-arm64" / "python.exe"
         found.parent.mkdir(parents=True)
         found.write_bytes(b"")
-        with mock.patch.dict(os.environ, LOCALAPPDATA=str(radio.ROOT)), on_os("win32"), \
+        with mock.patch.dict(os.environ, LOCALAPPDATA=str(core.ROOT)), on_os("win32"), \
                 mock.patch.object(dj, "PY_VOICE_MAX", (3, 99)), mock.patch.object(dj, "PY_VOICE_MIN", (3, 99)), \
                 mock.patch.object(dj, "_side_by_side", return_value=iter([])):
             self.assertEqual(radio._voice_python(), str(found))
 
     @unittest.skipUnless(os.name == "nt", "%LOCALAPPDATA% paths expand only on Windows")
     def test_winget_is_found_where_claude_codes_shell_cant_see_it(self):
-        alias = radio.ROOT / "Microsoft" / "WindowsApps" / "winget.exe"
-        with mock.patch.dict(os.environ, LOCALAPPDATA=str(radio.ROOT)), on_os("win32"), \
+        alias = core.ROOT / "Microsoft" / "WindowsApps" / "winget.exe"
+        with mock.patch.dict(os.environ, LOCALAPPDATA=str(core.ROOT)), on_os("win32"), \
                 mock.patch.object(radio.shutil, "which", return_value=None):
             self.assertIsNone(radio._python_getter())
             alias.parent.mkdir(parents=True)

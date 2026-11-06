@@ -10,7 +10,7 @@ counts were cross-checked against Hugging Face `tokenizers` 0.22.1 loading the s
 import json
 import unittest
 
-from radio_test_support import radio, reset_home
+from radio_test_support import core, radio, reset_home
 
 SPACE = "▁"
 
@@ -71,7 +71,7 @@ class PromptTokensExact(unittest.TestCase):
         radio._TOKENIZER = None
 
     def test_tokenizer_file_is_where_the_code_looks(self):
-        self.assertEqual(radio.TOKENIZER_FILE, radio.ROOT / "llm" / "t5gemma-tokenizer.json")
+        self.assertEqual(radio.TOKENIZER_FILE, core.ROOT / "llm" / "t5gemma-tokenizer.json")
 
     def test_counts(self):
         self.write(fixture())

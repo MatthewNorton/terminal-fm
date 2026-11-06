@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest import mock
 
-from radio_test_support import radio, reset_home, run
+from radio_test_support import core, radio, reset_home, run
 
 
 class LoadConfig(unittest.TestCase):
@@ -19,31 +19,31 @@ class LoadConfig(unittest.TestCase):
         reset_home()
 
     def test_defaults_without_a_file(self):
-        self.assertFalse(radio.CONFIG_FILE.exists())
-        self.assertEqual(radio.load_config(), radio.DEFAULT_CONFIG)
+        self.assertFalse(core.CONFIG_FILE.exists())
+        self.assertEqual(core.load_config(), core.DEFAULT_CONFIG)
 
     def test_shallow_merge_overlay(self):
-        radio.CONFIG_FILE.write_text(json.dumps({
+        core.CONFIG_FILE.write_text(json.dumps({
             "volume": 50,
             "stability_api": {"duration": 90},
             "dj": {"breaking_news": True},
             "extra": 1,
         }), encoding="utf-8")
-        cfg = radio.load_config()
+        cfg = core.load_config()
         self.assertEqual(cfg["volume"], 50)
         self.assertEqual(cfg["stability_api"]["duration"], 90)
         self.assertEqual(cfg["stability_api"]["model"], "stable-audio-3")   # sibling default kept
         self.assertEqual(cfg["dj"], {"announce_when_idle": False, "breaking_news": True})
         self.assertEqual(cfg["extra"], 1)
-        self.assertEqual(radio.DEFAULT_CONFIG["stability_api"]["duration"], 120)  # not mutated
+        self.assertEqual(core.DEFAULT_CONFIG["stability_api"]["duration"], 120)  # not mutated
 
     def test_scalar_replaces_a_section(self):
-        radio.CONFIG_FILE.write_text(json.dumps({"dj": "off"}), encoding="utf-8")
-        self.assertEqual(radio.load_config()["dj"], "off")
+        core.CONFIG_FILE.write_text(json.dumps({"dj": "off"}), encoding="utf-8")
+        self.assertEqual(core.load_config()["dj"], "off")
 
     def test_unparsable_file_gives_defaults(self):
-        radio.CONFIG_FILE.write_text("{not json", encoding="utf-8")
-        self.assertEqual(radio.load_config(), radio.DEFAULT_CONFIG)
+        core.CONFIG_FILE.write_text("{not json", encoding="utf-8")
+        self.assertEqual(core.load_config(), core.DEFAULT_CONFIG)
 
 
 class SetConfig(unittest.TestCase):
@@ -51,51 +51,51 @@ class SetConfig(unittest.TestCase):
         reset_home()
 
     def read(self):
-        return json.loads(radio.CONFIG_FILE.read_text(encoding="utf-8"))
+        return json.loads(core.CONFIG_FILE.read_text(encoding="utf-8"))
 
     def test_creates_file_and_merges(self):
-        ok, out = run(radio.set_config, "dj", "breaking_news", True)
+        ok, out = run(core.set_config, "dj", "breaking_news", True)
         self.assertTrue(ok)
         self.assertEqual(out, "")
-        ok, _ = run(radio.set_config, "dj", "announce_when_idle", True)
-        ok2, _ = run(radio.set_config, None, "library_dir", "jazz")
+        ok, _ = run(core.set_config, "dj", "announce_when_idle", True)
+        ok2, _ = run(core.set_config, None, "library_dir", "jazz")
         self.assertTrue(ok and ok2)
         self.assertEqual(self.read(), {"dj": {"breaking_news": True, "announce_when_idle": True},
                                        "library_dir": "jazz"})
 
     def test_keeps_unrelated_settings(self):
-        radio.CONFIG_FILE.write_text(json.dumps({"volume": 40, "stability_api": {"ca_bundle": "x.pem"}}),
+        core.CONFIG_FILE.write_text(json.dumps({"volume": 40, "stability_api": {"ca_bundle": "x.pem"}}),
                                      encoding="utf-8")
-        run(radio.set_config, "stability_api", "output_format", "wav")
+        run(core.set_config, "stability_api", "output_format", "wav")
         self.assertEqual(self.read(), {"volume": 40, "stability_api": {"ca_bundle": "x.pem",
                                                                        "output_format": "wav"}})
 
     def test_non_dict_section_is_replaced(self):
-        radio.CONFIG_FILE.write_text(json.dumps({"dj": "off"}), encoding="utf-8")
-        run(radio.set_config, "dj", "breaking_news", False)
+        core.CONFIG_FILE.write_text(json.dumps({"dj": "off"}), encoding="utf-8")
+        run(core.set_config, "dj", "breaking_news", False)
         self.assertEqual(self.read(), {"dj": {"breaking_news": False}})
 
     def test_refuses_to_overwrite_unparsable_config(self):
         for bad in ("{not json", "[1, 2]", '"text"', ""):
             with self.subTest(bad=bad):
-                radio.CONFIG_FILE.write_text(bad, encoding="utf-8")
-                ok, out = run(radio.set_config, "stability_api", "output_format", "wav")
+                core.CONFIG_FILE.write_text(bad, encoding="utf-8")
+                ok, out = run(core.set_config, "stability_api", "output_format", "wav")
                 self.assertFalse(ok)
                 self.assertIn("Not saved", out)
-                self.assertEqual(radio.CONFIG_FILE.read_text(encoding="utf-8"), bad)
+                self.assertEqual(core.CONFIG_FILE.read_text(encoding="utf-8"), bad)
 
 
 class AtomicWrite(unittest.TestCase):
     def setUp(self):
         reset_home()
-        self.path = radio.ROOT / "atomic.json"
+        self.path = core.ROOT / "atomic.json"
 
     def leftovers(self):
-        return [p.name for p in radio.ROOT.iterdir() if p.name.endswith(".tmp")]
+        return [p.name for p in core.ROOT.iterdir() if p.name.endswith(".tmp")]
 
     def test_writes_and_replaces_without_temp_files(self):
-        radio._atomic_write(self.path, "first")
-        radio._atomic_write(self.path, "café → second")
+        core._atomic_write(self.path, "first")
+        core._atomic_write(self.path, "café → second")
         self.assertEqual(self.path.read_text(encoding="utf-8"), "café → second")
         self.assertEqual(self.leftovers(), [])
 
@@ -103,20 +103,20 @@ class AtomicWrite(unittest.TestCase):
         # Windows refuses os.replace while a reader holds the target open.
         self.path.write_text("old", encoding="utf-8")
         with mock.patch.object(radio.os, "replace", side_effect=PermissionError("in use")):
-            radio._atomic_write(self.path, "new")
+            core._atomic_write(self.path, "new")
         self.assertEqual(self.path.read_text(encoding="utf-8"), "new")
         self.assertEqual(self.leftovers(), [])
 
     def test_write_json_and_state(self):
-        radio._write_json(self.path, {"a": [1, 2]})
+        core._write_json(self.path, {"a": [1, 2]})
         self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"a": [1, 2]})
-        radio.write_state(status="playing", daemon_pid=None, now_playing="x.mp3")
-        self.assertEqual(radio.read_state(), {"status": "playing", "daemon_pid": None,
+        core.write_state(status="playing", daemon_pid=None, now_playing="x.mp3")
+        self.assertEqual(core.read_state(), {"status": "playing", "daemon_pid": None,
                                               "now_playing": "x.mp3"})
 
     def test_torn_state_reads_as_stopped(self):
-        radio.STATE_FILE.write_text('{"status": "play', encoding="utf-8")
-        self.assertEqual(radio.read_state()["status"], "stopped")
+        core.STATE_FILE.write_text('{"status": "play', encoding="utf-8")
+        self.assertEqual(core.read_state()["status"], "stopped")
 
 
 def _sleeper():
@@ -131,7 +131,7 @@ def _posix_self_exe(executable, proc_name):
     """Patches for radio._self_exe() as a POSIX daemon started from `executable` computes it,
     with the OS reporting `proc_name` for every pid."""
     stack = contextlib.ExitStack()
-    stack.enter_context(mock.patch.object(radio, "IS_WIN", False))
+    stack.enter_context(mock.patch.object(core, "IS_WIN", False))
     stack.enter_context(mock.patch.object(radio, "_SELF_EXE", None))
     stack.enter_context(mock.patch.object(radio.sys, "executable", executable))
     stack.enter_context(mock.patch.object(radio, "_proc_name", return_value=proc_name))

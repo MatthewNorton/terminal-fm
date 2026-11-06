@@ -16,7 +16,7 @@ import unittest
 import wave
 from unittest import mock
 
-from radio_test_support import patch, radio, reset_home, run
+from radio_test_support import core, patch, radio, reset_home, run
 
 FFMPEG = shutil.which("ffmpeg")
 
@@ -67,8 +67,8 @@ class FakeStability:
 class GenTestCase(unittest.TestCase):
     def setUp(self):
         reset_home()
-        radio.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
-        self.config(radio.load_config())
+        core.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
+        self.config(core.load_config())
         for name in ("_http_post", "_http_get", "_curl"):       # tripwires: no real network
             self.patch(name, side_effect=AssertionError(f"{name} reached in a stubbed test"))
         self.patch("_llm_paths", return_value=(None, None))      # no local model, ever
@@ -79,7 +79,7 @@ class GenTestCase(unittest.TestCase):
 
     def config(self, cfg):
         """Install a config as a fresh process would see it (CONFIG is read once at import)."""
-        p = mock.patch.object(radio, "CONFIG", cfg)
+        p = mock.patch.object(core, "CONFIG", cfg)
         p.start()
         self.addCleanup(p.stop)
 
@@ -90,7 +90,7 @@ class GenTestCase(unittest.TestCase):
 
     def history(self):
         return [json.loads(line) for line in
-                radio.HISTORY_FILE.read_text(encoding="utf-8").splitlines() if line.strip()]
+                core.HISTORY_FILE.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     def lines(self, out):
         return [ln for ln in out.splitlines() if ln.strip()]
@@ -98,7 +98,7 @@ class GenTestCase(unittest.TestCase):
 
 class Format(GenTestCase):
     def saved(self):
-        return radio.load_config()["stability_api"]["output_format"]
+        return core.load_config()["stability_api"]["output_format"]
 
     def test_show(self):
         _, out = run(radio.cmd_format, [])
@@ -113,25 +113,25 @@ class Format(GenTestCase):
                 _, out = run(radio.cmd_format, [arg])
                 self.assertIn(f"Output format: {want}", out)
                 self.assertEqual(self.saved(), want)
-        self.assertEqual(radio.load_config()["stability_api"]["model"], "stable-audio-3")
+        self.assertEqual(core.load_config()["stability_api"]["model"], "stable-audio-3")
 
     def test_unknown_format_not_saved(self):
         _, out = run(radio.cmd_format, ["flac"])
         self.assertIn("Unknown format 'flac'", out)
-        self.assertFalse(radio.CONFIG_FILE.exists())
+        self.assertFalse(core.CONFIG_FILE.exists())
 
     def test_wav_mp3_refused_without_ffmpeg(self):
         self.patch("_ffmpeg", return_value=None)
         _, out = run(radio.cmd_format, ["wav+mp3"])
         self.assertIn("needs ffmpeg", out)
         self.assertIn("Not saved", out)
-        self.assertFalse(radio.CONFIG_FILE.exists())
+        self.assertFalse(core.CONFIG_FILE.exists())
 
     def test_corrupt_config_left_alone(self):
-        radio.CONFIG_FILE.write_text("{broken", encoding="utf-8")
+        core.CONFIG_FILE.write_text("{broken", encoding="utf-8")
         _, out = run(radio.cmd_format, ["wav"])
         self.assertIn("Not saved", out)
-        self.assertEqual(radio.CONFIG_FILE.read_text(encoding="utf-8"), "{broken")
+        self.assertEqual(core.CONFIG_FILE.read_text(encoding="utf-8"), "{broken")
 
 
 class GenGrammar(GenTestCase):
@@ -220,7 +220,7 @@ class TrackNames(unittest.TestCase):
 
 class GenSaves(GenTestCase):
     def set_format(self, fmt):
-        cfg = radio.load_config()
+        cfg = core.load_config()
         cfg["stability_api"]["output_format"] = fmt
         self.config(cfg)
 
@@ -233,7 +233,7 @@ class GenSaves(GenTestCase):
             "Length: user decided 12s",
             "Prompt: Calm piano!",
             "Cost: 52 credits",
-            f"Folder: {radio.OUTDIR.name} / track(s) added: 1 / total: 1 track",
+            f"Folder: {core.OUTDIR.name} / track(s) added: 1 / total: 1 track",
         ])
         sub = fake.submits[0]
         self.assertEqual((sub["prompt"], sub["model"], sub["steps"], sub["duration"], sub["output_format"]),
@@ -253,7 +253,7 @@ class GenSaves(GenTestCase):
         self.assertIn("Cost: unknown", out)
 
     def test_no_key_says_nothing_was_sent(self):
-        radio.KEY_FILE.unlink()
+        core.KEY_FILE.unlink()
         fake = FakeStability()
         self.use_api(fake)
         with mock.patch.dict(radio.os.environ):
@@ -281,7 +281,7 @@ class GenSaves(GenTestCase):
         run(radio.cmd_gen, ["calm piano", "12"])
         lib = radio.get_library()
         self.assertEqual([p.suffix for p in lib], [".wav"])
-        self.assertFalse((radio.OUTDIR / radio.WAV_SUBDIR).exists())
+        self.assertFalse((core.OUTDIR / radio.WAV_SUBDIR).exists())
 
     def test_wav_mp3_without_ffmpeg_keeps_the_wav_playable(self):
         self.set_format("wav+mp3")
@@ -291,10 +291,10 @@ class GenSaves(GenTestCase):
         _, out = run(radio.cmd_gen, ["calm piano", "12"])
         self.assertEqual(fake.submits[0]["output_format"], "wav")
         self.assertIn("MP3 (1/1) not made (ffmpeg not found); kept the WAV in "
-                      f"{radio.OUTDIR.name} instead.", out)
+                      f"{core.OUTDIR.name} instead.", out)
         lib = radio.get_library()
         self.assertEqual([p.suffix for p in lib], [".wav"])
-        self.assertEqual(list((radio.OUTDIR / radio.WAV_SUBDIR).iterdir()), [])
+        self.assertEqual(list((core.OUTDIR / radio.WAV_SUBDIR).iterdir()), [])
         self.assertEqual(self.history()[-1]["file"], lib[0].name)
         self.assertIn("track(s) added: 1", out)
 
@@ -303,8 +303,8 @@ class GenSaves(GenTestCase):
         # Through the real path: cmd_format persists the choice, a fresh config is read the way a
         # new process would, then gen saves WAV masters in _wav and plays MP3s from the library.
         _, out = run(radio.cmd_format, ["wav+mp3"])
-        self.assertIn(f"{radio.OUTDIR.name}/{radio.WAV_SUBDIR}", out)
-        self.config(radio.load_config())
+        self.assertIn(f"{core.OUTDIR.name}/{radio.WAV_SUBDIR}", out)
+        self.config(core.load_config())
         fake = FakeStability(use_ffmpeg=True)
         self.use_api(fake)
         _, out = run(radio.cmd_gen, ["calm piano", "2", "5"])
@@ -312,7 +312,7 @@ class GenSaves(GenTestCase):
         self.assertIn("track(s) added: 2 / total: 2 tracks", out)
         self.assertNotIn("not made", out)
         lib = radio.get_library()
-        masters = sorted((radio.OUTDIR / radio.WAV_SUBDIR).iterdir())
+        masters = sorted((core.OUTDIR / radio.WAV_SUBDIR).iterdir())
         self.assertEqual([p.suffix for p in lib], [".mp3", ".mp3"])
         self.assertEqual([p.stem for p in masters], [p.stem for p in lib])
         for mp3, wav in zip(lib, masters):

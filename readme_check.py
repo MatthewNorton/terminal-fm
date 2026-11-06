@@ -4,10 +4,12 @@ README guard for Terminal FM. README.md is the source of truth for how the radio
 script keeps that true. Stdlib-only, like the rest of the core.
 
 Layer 1 - mechanical drift. Facts are pulled from the code with `ast` (nothing is imported, so
-running this has no side effects) and each one must appear in README.md:
+running this has no side effects) and each one must appear in README.md. radio.py's facts are read
+from radio.py and the tfm/ modules it imports joined into one, with `core.ROOT` read as `ROOT`, so
+moving code between them changes none:
   * every radio.py subcommand and alias, and every keyword a command compares its input to
   * every command has its own `### ` heading in the full reference
-  * the config shape and defaults (radio.py DEFAULT_CONFIG + dj.py DJ_DEFAULTS) equal README's
+  * the config shape and defaults (DEFAULT_CONFIG + dj.py DJ_DEFAULTS) equal README's
     ```json block, key for key and value for value
   * every file/folder name the code builds with `/` under ~/.claude/terminal-fm
   * dj.py subcommands and --flags, kokoro_tts.py --flags
@@ -41,9 +43,9 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 README = HERE / "README.md"
 SKILL = HERE / "skills" / "tfm" / "SKILL.md"       # the plugin's skill, in this repo
-WATCHED = ("radio.py", "dj.py", "kokoro_tts.py", "readme_check.py")
+WATCHED = ("radio.py", "dj.py", "kokoro_tts.py", "readme_check.py")    # and every tfm/*.py: _watched()
 SYNC_DIR = HERE / ".readme_sync"
-SNAP_DIR = SYNC_DIR / "snapshot"          # copies of WATCHED as of the last --confirm
+SNAP_DIR = SYNC_DIR / "snapshot"          # copies of the watched files as of the last --confirm
 CONFIRM_LOG = SYNC_DIR / "confirm.log"
 SELF = f'python "{HERE / "readme_check.py"}"'
 
@@ -55,6 +57,38 @@ INPUT_NAMES = {"args", "sub", "arg", "target", "event", "cmd", "argv", "slot", "
 # --------------------------------------------------------------------------- code facts
 def _tree(name):
     return ast.parse((HERE / name).read_text(encoding="utf-8"), filename=name)
+
+
+def _radio_files():
+    """radio.py and its tfm/ modules: the code a radio.py command runs."""
+    return ["radio.py"] + sorted(f"tfm/{p.name}" for p in (HERE / "tfm").glob("*.py"))
+
+
+class _Unprefix(ast.NodeTransformer):
+    """`core.ROOT` -> `ROOT` for every tfm module, so the joined code reads like the single file it
+    was: a check matching a bare name (`"setup": cmd_setup` in COMMANDS) still finds it after a move."""
+
+    def __init__(self, mods):
+        self.mods = mods
+
+    def visit_Attribute(self, node):
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and node.value.id in self.mods:
+            return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
+        return node
+
+
+def _radio_code():
+    """(text, tree) of _radio_files() joined in that order, with the tfm module prefixes dropped."""
+    files = _radio_files()
+    text = "\n".join((HERE / f).read_text(encoding="utf-8") for f in files)
+    return text, _Unprefix({Path(f).stem for f in files[1:]}).visit(ast.parse(text))
+
+
+def _watched():
+    """WATCHED plus every tfm/ module, including one deleted since the last --confirm."""
+    snapped = {f"tfm/{p.name}" for p in (SNAP_DIR / "tfm").glob("*.py")}
+    return list(WATCHED) + sorted(set(_radio_files()[1:]) | snapped)
 
 
 def _module_literals(tree):
@@ -259,8 +293,8 @@ def drift():
     """Mechanical README drift. Returns a list of human-readable problems (empty = clean)."""
     readme = README.read_text(encoding="utf-8")
     toks, heads = _code_tokens(readme), _heading_tokens(readme)
-    radio_src = (HERE / "radio.py").read_text(encoding="utf-8")
-    radio, dj, kok = _tree("radio.py"), _tree("dj.py"), _tree("kokoro_tts.py")
+    radio_src, radio = _radio_code()
+    dj, kok = _tree("dj.py"), _tree("kokoro_tts.py")
     rlit, dlit = _module_literals(radio), _module_literals(dj)
     probs = []
 
@@ -292,7 +326,7 @@ def drift():
     for k, v in (dlit.get("DJ_DEFAULTS") or {}).items():
         dj_sec = expected.setdefault("dj", {})
         if k in dj_sec and dj_sec[k] != v:
-            probs.append(f"[code] radio.py DEFAULT_CONFIG.dj.{k}={dj_sec[k]!r} but dj.py "
+            probs.append(f"[code] DEFAULT_CONFIG.dj.{k}={dj_sec[k]!r} but dj.py "
                          f"DJ_DEFAULTS.{k}={v!r}")
         dj_sec.setdefault(k, v)
     doc = _readme_config(readme)
@@ -333,7 +367,7 @@ def drift():
     order_line = next((ln for ln in readme.splitlines() if "First found wins" in ln), "")
     pos = [order_line.find(f"`{p}`") for p in players]
     if not players:
-        probs.append("[code] could not find _players() in radio.py - update readme_check.py")
+        probs.append("[code] could not find _players() in radio.py or tfm/ - update readme_check.py")
     elif -1 in pos or pos != sorted(pos):
         probs.append(f"[players] README's 'First found wins' line must list "
                      f"{' > '.join(players)} in that order")
@@ -390,7 +424,7 @@ def drift():
         probs.append("[gen] DUR_RULES groups are listed out of order (the code checks them in order)")
     for src in _source_names(radio_src):
         if src.lower() not in toks:
-            probs.append(f"[sources] `{src}` (SOURCES in radio.py) is missing from README")
+            probs.append(f"[sources] `{src}` (SOURCES) is missing from README")
 
     if SKILL.exists():
         stoks = _code_tokens(SKILL.read_text(encoding="utf-8"))
@@ -405,7 +439,7 @@ def drift():
 def unreviewed():
     """Watched files whose content differs from the last --confirm snapshot."""
     out = []
-    for n in WATCHED:
+    for n in _watched():
         cur, snap = HERE / n, SNAP_DIR / n
         if cur.exists() != snap.exists():
             out.append(n)
@@ -435,9 +469,9 @@ def confirm():
             print(f"  - {p}")
         return 1
     changed = unreviewed()
-    SNAP_DIR.mkdir(parents=True, exist_ok=True)
-    for n in WATCHED:
+    for n in _watched():
         if (HERE / n).exists():
+            (SNAP_DIR / n).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(HERE / n, SNAP_DIR / n)
         elif (SNAP_DIR / n).exists():
             (SNAP_DIR / n).unlink()

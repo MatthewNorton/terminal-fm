@@ -4,7 +4,7 @@ the enhancer (_split_duration), and gen's auto-pick (pick_duration)."""
 import unittest
 from unittest import mock
 
-from radio_test_support import radio, reset_home
+from radio_test_support import core, radio, reset_home
 
 
 class StatedDuration(unittest.TestCase):
@@ -64,9 +64,9 @@ class SplitDuration(unittest.TestCase):
 class PickDuration(unittest.TestCase):
     def setUp(self):
         reset_home()
-        cfg = radio.load_config()
+        cfg = core.load_config()
         cfg["stability_api"]["duration"] = 77
-        p = mock.patch.object(radio, "CONFIG", cfg)
+        p = mock.patch.object(core, "CONFIG", cfg)
         p.start()
         self.addCleanup(p.stop)
 
