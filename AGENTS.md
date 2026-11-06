@@ -6,7 +6,7 @@ Rules for any agent changing this folder (Claude Code, Codex, or anything else).
 
 `README.md` is the source of truth for how the radio behaves, and it must stay true. If the code and the README disagree, one of them is wrong: fix it in the same change, never leave them disagreeing.
 
-**When you change `radio.py`, `dj.py`, `kokoro_tts.py` or `readme_check.py`, update `README.md` in the same change** if you added, removed or altered any of:
+**When you change `radio.py` or its `tfm/` modules, `dj.py`, `kokoro_tts.py` or `readme_check.py`, update `README.md` in the same change** if you added, removed or altered any of:
 
 - a subcommand, an alias, or a keyword a command accepts (`clear`, `all`, `auto`, the on/off words, …)
 - a flag (`play --say`, `dj.py --file`, `kokoro_tts.py --voice`, …)
@@ -36,6 +36,7 @@ python readme_check.py --confirm    # only after README.md reflects them
 
 ## Other rules
 
-- `radio.py`, `dj.py` and `readme_check.py` stay stdlib-only and cross-platform. Only `kokoro_tts.py` may import third-party packages.
+- `radio.py` and its `tfm/` modules, `dj.py` and `readme_check.py` stay stdlib-only and cross-platform. Only `kokoro_tts.py` may import third-party packages.
+- Nothing imports `radio`, which runs as `__main__`: code it shares lives in `tfm/` and is imported as a module (`from tfm import core`, then `core.ROOT`), never by name.
 - Don't hard-wrap prose in `.md` files: one line per paragraph or bullet.
 - Other people or agent sessions may be editing the same files. Before a large edit, check whether a file changed under you, and coordinate rather than overwrite.
