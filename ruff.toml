@@ -1,0 +1,12 @@
+# Lint rules for every Python file here, run by CI's lint job: `ruff check .` (pinned version in
+# .github/workflows/ci.yml). Ruff is a CI tool only; the radio itself still needs nothing installed.
+#
+# The rules start with what the code passed on 2026-11-06: pyflakes (F: undefined and unused names,
+# which moving code between modules can leave behind) and pycodestyle's errors and warnings (E, W).
+# Line length (E501) is off for now: 1,319 lines are over ruff's 88 and 399 over PEP 8's 99, to be
+# rewrapped once radio.py has been split, so the move doesn't mix with reformatting.
+target-version = "py311"
+
+[lint]
+select = ["F", "E", "W"]
+ignore = ["E501"]
