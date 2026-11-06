@@ -80,12 +80,29 @@ jobs:
           claude plugin validate . --strict
           claude plugin validate .claude-plugin/plugin.json --strict
 
+  # The rules are in ruff.toml. Ruff is pinned, like the actions, so a new release can't start
+  # failing CI on unchanged code; 0.17.2 was the newest release at least two weeks old on 2026-11-06.
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+
+      - name: Ruff
+        run: |
+          python -m pip install -q ruff==0.17.2
+          ruff check --output-format=github .
+
   # The ruleset on main requires this job by its name, so renaming it means editing the ruleset.
   # always() makes it run, and fail, when a job it needs failed or was cancelled: GitHub counts a
   # job skipped by its condition as passed.
   ci-passed:
     name: CI passed
-    needs: test
+    needs: [test, lint]
     if: always()
     runs-on: ubuntu-latest
     steps:

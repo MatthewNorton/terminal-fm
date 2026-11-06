@@ -442,6 +442,7 @@ python -m unittest discover tests     # unit tests
 python smoke_test.py                  # the read-only commands against a throwaway data folder
 python readme_check.py                # README drift; --diff and --confirm after a code change
 python release_check.py               # before publishing: home paths, personal emails, keys, big files
+ruff check .                          # lint, with the rules in ruff.toml (CI pins the ruff version)
 claude plugin validate . --strict     # the plugin manifest and hooks
 claude --plugin-dir .                 # try a checkout for one session without installing it
 ```
