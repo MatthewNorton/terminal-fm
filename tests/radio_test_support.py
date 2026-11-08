@@ -1,8 +1,9 @@
-"""Shared set-up for the Terminal FM unit tests. Import `radio` from here, never directly.
+"""Shared set-up for the Terminal FM unit tests. Import `radio` and the tfm modules from here,
+never directly.
 
-radio.py has import-time side effects: it reads config.json and creates queue/ and the library
-folder under its data directory. So this module points TERMINAL_FM_HOME at a fresh temporary folder
-BEFORE radio is imported, and refuses to run if radio was already imported against any other
+Importing radio has side effects (tfm/core.py reads config.json and creates queue/ and the library
+folder under its data directory). So this module points TERMINAL_FM_HOME at a fresh temporary
+folder BEFORE radio is imported, and refuses to run if it was already imported against any other
 folder. The tests can then never read or write the real data directory (state, config, the key,
 the queue or the library). The temporary folder is deleted when the test process exits.
 """
@@ -22,8 +23,8 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-if "radio" in sys.modules:
-    _existing = Path(getattr(sys.modules["radio"], "ROOT", "")).resolve()
+if "tfm.core" in sys.modules:                  # radio imports it, so this covers radio too
+    _existing = Path(getattr(sys.modules["tfm.core"], "ROOT", "")).resolve()
     if os.environ.get("TERMINAL_FM_TEST_HOME") != str(_existing):
         raise RuntimeError(f"radio was imported before the test home was set (data dir {_existing}); "
                            "refusing to run tests against it")
@@ -35,15 +36,19 @@ else:
     atexit.register(shutil.rmtree, str(HOME), True)
 
 import radio  # noqa: E402  (must come after TERMINAL_FM_HOME is set)
+from tfm import core  # noqa: E402
 
-if Path(radio.ROOT).resolve() != HOME:
-    raise RuntimeError(f"radio.ROOT is {radio.ROOT}, expected the test home {HOME}")
+# Every module a test can patch a name in: radio and the tfm modules it loaded.
+MODULES = (radio,) + tuple(m for n, m in sorted(sys.modules.items()) if n.startswith("tfm."))
+
+if Path(core.ROOT).resolve() != HOME:
+    raise RuntimeError(f"core.ROOT is {core.ROOT}, expected the test home {HOME}")
 
 
 def reset_home():
     """Empty the temporary data directory between tests (it is shared by the whole run) and drop
-    the cached tokenizer, so no test sees another test's files."""
-    root = Path(radio.ROOT).resolve()
+    the cached tokenizer and every functools cache, so no test sees another test's files."""
+    root = Path(core.ROOT).resolve()
     if root != HOME or not str(root).startswith(str(Path(tempfile.gettempdir()).resolve())):
         raise RuntimeError(f"refusing to clear {root}: not the temporary test home")
     for child in root.iterdir():
@@ -51,16 +56,29 @@ def reset_home():
             shutil.rmtree(child)
         else:
             child.unlink()
-    radio.QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    radio.OUTDIR.mkdir(parents=True, exist_ok=True)
+    core.QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    core.OUTDIR.mkdir(parents=True, exist_ok=True)
     radio._TOKENIZER = None
-    radio._voice_ready.cache_clear()
-    radio._takes_single_turn.cache_clear()
+    for m in MODULES:                   # every functools cache, in whichever module a move put it
+        for v in vars(m).values():
+            if hasattr(v, "cache_clear") and getattr(v, "__module__", None) == m.__name__:
+                v.cache_clear()
+
+
+def code_files():
+    """radio.py and the tfm modules it loaded: the code a radio.py command runs."""
+    return [Path(m.__file__) for m in MODULES]
 
 
 def patch(case, name, **kwargs):
-    """Patch radio.<name> until the end of the test `case` (its cleanup undoes it)."""
-    p = mock.patch.object(radio, name, **kwargs)
+    """Patch <name> in the one module that defines it (radio or a tfm module) until the end of the
+    test `case`. A name in no module, or in several, fails here instead of patching a copy that
+    nothing reads (tfm/__init__.py has the rule behind it)."""
+    owners = [m for m in MODULES if name in vars(m)]
+    if len(owners) != 1:
+        raise AssertionError(f"patch({name!r}): defined in {[m.__name__ for m in owners] or 'no module'}; "
+                             "it needs exactly one")
+    p = mock.patch.object(owners[0], name, **kwargs)
     case.addCleanup(p.stop)
     return p.start()
 
@@ -83,8 +101,8 @@ OSES = ("win32", "darwin", "linux")
 
 @contextlib.contextmanager
 def on_os(platform):
-    """radio as it runs on `platform`, one of OSES: IS_WIN and sys.platform to match."""
-    with mock.patch.object(radio, "IS_WIN", platform == "win32"), \
+    """radio as it runs on `platform`, one of OSES: core.IS_WIN and sys.platform to match."""
+    with mock.patch.object(core, "IS_WIN", platform == "win32"), \
             mock.patch.object(radio.sys, "platform", platform):
         yield
 
@@ -104,7 +122,7 @@ class SetupCase(unittest.TestCase):
         self.addCleanup(env.stop)
         for var in ("STABILITY_API_KEY",) + HF_VARS:
             os.environ.pop(var, None)
-        os.environ["HF_TOKEN_PATH"] = str(radio.ROOT / "no-login")
+        os.environ["HF_TOKEN_PATH"] = str(core.ROOT / "no-login")
         cfg = tempfile.mkdtemp(prefix="terminal-fm-cfg-")
         self.addCleanup(shutil.rmtree, cfg, True)
         os.environ["CLAUDE_CONFIG_DIR"] = cfg          # never read the real ~/.claude/settings.json
@@ -114,9 +132,9 @@ class SetupCase(unittest.TestCase):
 
     def ready(self):
         patch(self, "detect_player", return_value=("/usr/bin/ffplay", None))
-        radio.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
-        (radio.OUTDIR / "a.mp3").write_bytes(b"ID3")
-        radio.HOOK_SEEN.write_text("2026-10-17 09:00", encoding="utf-8")
+        core.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
+        (core.OUTDIR / "a.mp3").write_bytes(b"ID3")
+        core.HOOK_SEEN.write_text("2026-10-17 09:00", encoding="utf-8")
 
     def setup_out(self, *args):
         return run(radio.cmd_setup, list(args))[1]

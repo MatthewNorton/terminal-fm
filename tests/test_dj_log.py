@@ -10,12 +10,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import radio, reset_home  # noqa: F401  (sets TERMINAL_FM_HOME first)
+from radio_test_support import core, radio, reset_home  # noqa: F401  (sets TERMINAL_FM_HOME first)
 
 import dj  # noqa: E402
 
-if Path(dj.ROOT).resolve() != Path(radio.ROOT).resolve():
-    raise RuntimeError(f"dj.ROOT is {dj.ROOT}, expected the test home {radio.ROOT}")
+if Path(dj.ROOT).resolve() != Path(core.ROOT).resolve():
+    raise RuntimeError(f"dj.ROOT is {dj.ROOT}, expected the test home {core.ROOT}")
 
 
 class FallbackReason(unittest.TestCase):

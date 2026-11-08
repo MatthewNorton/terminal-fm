@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from radio_test_support import own_line, radio, reset_home, run
+from radio_test_support import core, own_line, radio, reset_home, run
 
 
 def _sleeper():
@@ -50,7 +50,7 @@ class RaceCase(unittest.TestCase):
         return p, name
 
     def playing(self, proc, name, track, started):
-        radio.write_state(status="playing", daemon_pid=999999, daemon_exe="python.exe",
+        core.write_state(status="playing", daemon_pid=999999, daemon_exe="python.exe",
                           player_pid=proc.pid if proc else 424242, player_exe=name,
                           now_playing=track, player_started=started, player_offset=0)
 
@@ -78,7 +78,7 @@ class StopRace(RaceCase):
         _, out = run(radio.cmd_stop, [])
         self.assertIn("Radio stopped.", out)
         self.assert_killed(new)
-        st = radio.read_state()
+        st = core.read_state()
         self.assertEqual((st["status"], st["player_pid"]), ("stopped", None))
 
     def test_kills_both_when_the_first_read_player_is_still_alive(self):
@@ -110,11 +110,11 @@ class PauseRace(RaceCase):
         self.daemon_switches_to(new, name, "b.mp3", time.time() - 3)
         _, out = run(radio.cmd_pause, [])
         self.assert_killed(new)
-        saved = json.loads(radio.RESUME_FILE.read_text(encoding="utf-8"))
+        saved = json.loads(core.RESUME_FILE.read_text(encoding="utf-8"))
         self.assertEqual(saved["track"], "b.mp3")
         self.assertGreater(saved["offset"], 2.5)
         self.assertLess(saved["offset"], 60)                       # not the old track's 100 s
-        st = radio.read_state()
+        st = core.read_state()
         self.assertEqual((st["status"], st["now_playing"]), ("paused", "b.mp3"))
         self.assertIn("Paused at 0:0", out)
         self.assertIn("- b", out)
@@ -128,9 +128,9 @@ class PauseRace(RaceCase):
         self.daemon_switches_to(new, name, "b.mp3", time.time())   # under a second in
         _, out = run(radio.cmd_pause, [])
         self.assert_killed(new)
-        self.assertFalse(radio.RESUME_FILE.exists())
+        self.assertFalse(core.RESUME_FILE.exists())
         self.assertIn("nothing to resume", out)
-        self.assertEqual(radio.read_state()["status"], "stopped")
+        self.assertEqual(core.read_state()["status"], "stopped")
 
     def test_between_tracks_after_the_kill(self):
         old, name = self.player()
@@ -142,9 +142,9 @@ class PauseRace(RaceCase):
         p.start()
         self.addCleanup(p.stop)
         _, out = run(radio.cmd_pause, [])
-        self.assertFalse(radio.RESUME_FILE.exists())
+        self.assertFalse(core.RESUME_FILE.exists())
         self.assertIn("Paused between tracks, nothing to resume", out)
-        self.assertEqual(radio.read_state()["status"], "stopped")
+        self.assertEqual(core.read_state()["status"], "stopped")
 
 
 class PlaySay(unittest.TestCase):
@@ -165,14 +165,14 @@ class PlaySay(unittest.TestCase):
         self.assertEqual(radio.queue_files(), [])
 
     def test_no_player_queues_nothing(self):
-        (radio.OUTDIR / "a.mp3").write_bytes(b"ID3")
+        (core.OUTDIR / "a.mp3").write_bytes(b"ID3")
         with mock.patch.object(radio, "detect_player", return_value=(None, None)):
             _, out = run(radio.cmd_play, ["--say", "Good evening."])
         self.assertIn("No audio player found", out)
         self.assertEqual(radio.queue_files(), [])
 
     def test_sign_on_is_queued_first_when_play_starts(self):
-        (radio.OUTDIR / "a.mp3").write_bytes(b"ID3")
+        (core.OUTDIR / "a.mp3").write_bytes(b"ID3")
         radio.queue_add("an older hook line")
         self.assertEqual(self.play(["--say", "Good evening."]).call_count, 1)   # the daemon launch
         files = radio.queue_files()
@@ -182,15 +182,15 @@ class PlaySay(unittest.TestCase):
 
     def test_selection_with_sign_on_plays_the_selection(self):
         for name in ("a.mp3", "b.mp3", "c.mp3"):
-            (radio.OUTDIR / name).write_bytes(b"ID3")
+            (core.OUTDIR / name).write_bytes(b"ID3")
         run(radio.cmd_list, [])                                      # the numbers play refers to
         for args in (["3,1", "--say", "Smooth jazz tonight."], ["--say", "Smooth jazz tonight.", "3", "1"]):
             with self.subTest(args=args):
                 for f in radio.queue_files():
                     f.unlink()
-                radio.PLAYLIST_FILE.unlink(missing_ok=True)
+                core.PLAYLIST_FILE.unlink(missing_ok=True)
                 self.assertEqual(self.play(args).call_count, 1)
-                self.assertEqual(json.loads(radio.PLAYLIST_FILE.read_text(encoding="utf-8")),
+                self.assertEqual(json.loads(core.PLAYLIST_FILE.read_text(encoding="utf-8")),
                                  ["c.mp3", "a.mp3"])
                 files = radio.queue_files()
                 self.assertEqual([f.read_text(encoding="utf-8").strip() for f in files],
@@ -223,7 +223,7 @@ class KeyShow(unittest.TestCase):
                 with no_terminal, typed:
                     _, out = run(radio.cmd_key, [])
                 self.assertIn("No terminal to type the key into", out)
-                self.assertFalse(radio.KEY_FILE.exists())
+                self.assertFalse(core.KEY_FILE.exists())
 
     def typed_key(self, key):
         """cmd_key at a real terminal with `key` typed at the hidden prompt."""
@@ -244,18 +244,18 @@ class KeyShow(unittest.TestCase):
         with mock.patch.object(radio.os, "open", side_effect=spy):
             out = self.typed_key("test-key-not-real")
         self.assertIn("Key saved to", out)
-        self.assertEqual(radio.KEY_FILE.read_text(encoding="utf-8"), "test-key-not-real")
+        self.assertEqual(core.KEY_FILE.read_text(encoding="utf-8"), "test-key-not-real")
         tmp = [o for o in opened if o[0].startswith(".key.") and o[0].endswith(".tmp")]
         self.assertEqual(len(tmp), 1, opened)
         self.assertEqual(tmp[0][2], 0o600)
         self.assertTrue(tmp[0][1] & os.O_EXCL and tmp[0][1] & os.O_CREAT)
-        self.assertEqual(list(radio.ROOT.glob(".key.*.tmp")), [])
+        self.assertEqual(list(core.ROOT.glob(".key.*.tmp")), [])
         if os.name != "nt":
-            self.assertEqual(stat.S_IMODE(radio.KEY_FILE.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(core.KEY_FILE.stat().st_mode), 0o600)
 
     def test_key_written_when_the_rename_is_refused(self):
         # Windows refuses os.replace while a reader has .key open; the key must still be saved.
-        radio.KEY_FILE.write_text("old-key-not-real", encoding="utf-8")
+        core.KEY_FILE.write_text("old-key-not-real", encoding="utf-8")
         real_replace, calls = os.replace, []
 
         def refuse_first(src, dst):
@@ -267,16 +267,16 @@ class KeyShow(unittest.TestCase):
         # The fallback must stay owner-only too: _atomic_write creates files under the umask, which
         # wrote the key readable by other users until the chmod that followed.
         with mock.patch.object(radio.os, "replace", side_effect=refuse_first), \
-                mock.patch.object(radio, "_atomic_write") as general_writer:
+                mock.patch.object(core, "_atomic_write") as general_writer:
             self.typed_key("new-key-not-real")
         general_writer.assert_not_called()
-        self.assertEqual(radio.KEY_FILE.read_text(encoding="utf-8"), "new-key-not-real")
-        self.assertEqual(list(radio.ROOT.glob(".key.*.tmp")), [])
+        self.assertEqual(core.KEY_FILE.read_text(encoding="utf-8"), "new-key-not-real")
+        self.assertEqual(list(core.ROOT.glob(".key.*.tmp")), [])
         if os.name != "nt":
-            self.assertEqual(stat.S_IMODE(radio.KEY_FILE.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(core.KEY_FILE.stat().st_mode), 0o600)
 
     def test_stored_key_has_no_hint(self):
-        radio.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
+        core.KEY_FILE.write_text("test-key-not-real", encoding="utf-8")
         _, out = run(radio.cmd_key, ["show"])
         self.assertEqual(len(out.strip().splitlines()), 1)
         self.assertIn("source: .key file", out)
@@ -288,7 +288,7 @@ class KeyShow(unittest.TestCase):
             with self.subTest(source=source):
                 reset_home()
                 if source == ".key file":
-                    radio.KEY_FILE.write_text(key, encoding="utf-8")
+                    core.KEY_FILE.write_text(key, encoding="utf-8")
                 else:
                     os.environ["STABILITY_API_KEY"] = key
                 _, out = run(radio.cmd_key, ["show"])
